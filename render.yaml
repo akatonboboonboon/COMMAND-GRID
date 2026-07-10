@@ -3,6 +3,7 @@ services:
     name: command-grid
     runtime: python
     plan: free
+    numInstances: 1
     region: singapore
     buildCommand: pip install -r requirements.txt
     startCommand: python main.py
@@ -13,4 +14,3 @@ services:
         generateValue: true
       - key: NICEGUI_RELOAD
         value: "false"
-

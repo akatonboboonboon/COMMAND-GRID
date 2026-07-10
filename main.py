@@ -1,14 +1,10 @@
-"""COMMAND GRID — a multi-page NiceGUI UI prototype.
-
-The current build intentionally keeps game data local to the browser session.
-The UI and domain helpers are separated so PostgreSQL-backed multiplayer can be
-added without rewriting the screens.
-"""
+"""COMMAND GRID — a playable NiceGUI tactical card game."""
 
 from __future__ import annotations
 
 import os
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable, Iterator
 
@@ -16,18 +12,56 @@ from nicegui import app, ui
 
 from game_data import (
     CARDS,
+    FORMATION_SCALES,
     GLOSSARY,
     ROLE_INFO,
     STARTER_DECK,
     UnitCard,
     analyze_deck,
+    formation_label,
     get_card,
+    get_formation,
 )
 from symbol_catalog import (
     STAGE_LABELS,
     SYMBOL_CATALOG,
     SYMBOL_FAMILIES,
+    SYMBOL_INDEX,
     symbols_for_family,
+)
+from player_state import (
+    ensure_player_state,
+    store_player_state,
+    update_deck as update_state_deck,
+    update_formation as update_state_formation,
+    update_mode as update_state_mode,
+    update_preference as update_state_preference,
+    update_profile as update_state_profile,
+    update_selected_symbol as update_state_selected_symbol,
+)
+from game_engine import Phase, RuleViolation, calculate_lane_power
+from match_service import (
+    AI_PLAYER_ID,
+    HUMAN_PLAYER_ID,
+    abandon_match,
+    get_match_context,
+    load_match,
+    play_player_round,
+    restart_match,
+    start_match,
+)
+from multiplayer_service import (
+    MultiplayerError,
+    cancel_waiting,
+    claim_result as claim_multiplayer_result,
+    close_session as close_multiplayer_session,
+    create_friend_room,
+    disconnect as disconnect_multiplayer,
+    join_friend_room,
+    join_queue,
+    leave as leave_multiplayer,
+    poll as poll_multiplayer,
+    submit_player_order,
 )
 
 
@@ -49,24 +83,65 @@ MORE_NAV_ITEMS = (
 )
 
 PHASES = (
-    ("索敵", "隠れているカードを見つけます。"),
-    ("電子戦", "相手の情報や支援を妨げます。"),
-    ("砲撃", "見つけた相手を遠くから支援します。"),
-    ("機動", "部隊を移動し、突破を試みます。"),
-    ("地上戦", "同じ戦線にいる部隊を比べます。"),
-    ("制圧判定", "どちらがその戦線を確保したか決めます。"),
+    ("命令公開", "両者が選んだカードと配置先を同時に公開します。"),
+    ("索敵", "偵察値のぶん、同じ戦線の未確認部隊を公開します。"),
+    ("補給", "補給の生成量と、機甲・砲兵が必要とする量を比べます。"),
+    ("戦線力", "制圧に、有効な支援と完全補給の機甲ボーナスを加えます。"),
+    ("確保判定", "戦線力が高い側が、そのラウンドの戦線を確保します。"),
 )
 
 TUTORIAL_STEPS = (
-    ("目的", "難しい軍事知識は不要です。まずは3つの場所のうち2つを取ることだけ覚えましょう。"),
-    ("歩兵", "歩兵は場所を守る基本カードです。まず中央戦線の前列へ置きます。"),
+    ("目的", "難しい軍事知識は不要です。6ラウンド後に相手より多くの戦線を取れば勝ちです。"),
+    ("制圧", "制圧力は場所を取る土台です。最初は制圧力を持つカードを選びます。"),
     ("未確認部隊", "相手の伏せたカードは正体が分かるまで『未確認部隊』と表示されます。"),
-    ("偵察", "偵察は相手の伏せたカードを見る役です。攻撃前に情報を集めます。"),
-    ("砲兵", "砲兵は見つけた相手を遠くから支援します。単独では場所を取れません。"),
-    ("工兵", "工兵は道や守りを整え、同じ戦線の味方を助けます。"),
-    ("機甲と兵站", "機甲は突破役です。重い部隊なので兵站の補給があると本来の力を出せます。"),
+    ("偵察", "偵察値は、同じ戦線にいる未確認の相手カードを公開します。"),
+    ("支援", "支援力は、同じ戦線に味方の制圧力があるときだけ戦線力へ加わります。"),
+    ("補給", "補給需要を満たせないと不足分だけ戦線力が下がります。"),
+    ("機甲", "機甲は補給需要を完全に満たすと、1部隊につき戦線力が2上がります。"),
     ("同時命令", "あなたと相手の命令は同時に公開されます。相手の行動を予想するのがポイントです。"),
 )
+
+def get_preferences() -> dict[str, object]:
+    return dict(ensure_player_state(app.storage.user)["preferences"])
+
+
+def apply_preferences(preferences: dict[str, object]) -> None:
+    removable = (
+        "cg-beginner-off cg-terms-off cg-recommendations-off cg-high-contrast "
+        "cg-reduce-motion cg-large-symbols cg-patterns-off"
+    )
+    active: list[str] = []
+    if not preferences["beginner_mode"]:
+        active.append("cg-beginner-off")
+    if not preferences["explain_military_terms"]:
+        active.append("cg-terms-off")
+    if not preferences["recommended_actions"]:
+        active.append("cg-recommendations-off")
+    if preferences["high_contrast"]:
+        active.append("cg-high-contrast")
+    if preferences["reduce_motion"]:
+        active.append("cg-reduce-motion")
+    if preferences["large_symbols"]:
+        active.append("cg-large-symbols")
+    if not preferences["faction_patterns"]:
+        active.append("cg-patterns-off")
+    ui.query("body").classes(add=" ".join(active), remove=removable)
+    font_class = {
+        "standard": "",
+        "large": "cg-font-large",
+        "maximum": "cg-font-maximum",
+    }[str(preferences["font_size"])]
+    ui.query("html").classes(add=font_class, remove="cg-font-large cg-font-maximum")
+
+
+def set_preference(key: str, value: object) -> None:
+    state = ensure_player_state(app.storage.user)
+    try:
+        state = update_state_preference(state, key, value)  # type: ignore[arg-type]
+    except ValueError:
+        return
+    stored = store_player_state(app.storage.user, state)
+    apply_preferences(stored["preferences"])
 
 
 @app.get("/healthz")
@@ -76,6 +151,62 @@ def healthz() -> dict[str, str]:
 
 def go(path: str) -> None:
     ui.navigate.to(path)
+
+
+def begin_training(*, reset: bool = True) -> None:
+    online_view = poll_multiplayer(app.storage.user)
+    online_status = online_view.get("status")
+    if online_status in {"playing", "complete", "opponent_left"}:
+        ui.notify("先に進行中のオンライン対戦を確認してください。", type="warning")
+        go("/pvp")
+        return
+    if online_status in {"waiting", "waiting_friend"}:
+        try:
+            cancel_waiting(app.storage.user)
+        except MultiplayerError:
+            pass
+    elif online_status == "left":
+        try:
+            close_multiplayer_session(app.storage.user)
+        except MultiplayerError:
+            pass
+    state = update_state_mode(ensure_player_state(app.storage.user), "training")
+    store_player_state(app.storage.user, state)
+    try:
+        if reset:
+            restart_match(app.storage.user)
+        else:
+            start_match(app.storage.user)
+    except RuleViolation:
+        ui.notify("演習にはカードを6枚以上入れたデッキが必要です。", type="warning")
+        go("/deck")
+        return
+    go("/battle")
+
+
+def register_client_poll(
+    callback: Callable[[], None], *, cleanup: Callable[[], None] | None = None
+) -> None:
+    """Start a per-page poller only after the browser socket connects."""
+
+    client = ui.context.client
+    holder: dict[str, object] = {"timer": None}
+
+    def stop() -> None:
+        timer = holder.get("timer")
+        if timer is not None:
+            timer.cancel(with_current_invocation=True)
+            holder["timer"] = None
+
+    def start() -> None:
+        stop()
+        with client:
+            holder["timer"] = ui.timer(1.0, callback, immediate=False)
+
+    client.on_connect(start)
+    client.on_delete(stop)
+    if cleanup is not None:
+        client.on_delete(cleanup)
 
 
 def chip(text: str, variant: str = "") -> ui.label:
@@ -103,9 +234,10 @@ def secondary_button(label: str, path: str | None = None, icon: str | None = Non
     return ui.button(label, icon=icon, on_click=handler).props("no-caps flat").classes("secondary-button")
 
 
-def unit_symbol(card: UnitCard, size: str = "md") -> None:
+def unit_symbol(card: UnitCard, size: str = "md", formation_id: str | None = None) -> None:
+    marker, formation_name = formation_label(card, formation_id)
     with ui.element("div").classes(f"unit-symbol unit-symbol--{size}").props(
-        f'data-echelon="{card.echelon}" role="img" aria-label="{card.branch}の部隊記号"'
+        f'data-echelon="{marker}" role="img" aria-label="{card.branch}・{formation_name}の部隊記号"'
     ):
         ui.label(card.symbol)
 
@@ -123,6 +255,7 @@ def card_stats(card: UnitCard) -> None:
 
 
 def card_detail_dialog(card: UnitCard) -> ui.dialog:
+    preferences = get_preferences()
     with ui.dialog() as dialog, ui.card().classes("dialog-card"):
         with ui.row().classes("w-full items-start no-wrap gap-5"):
             unit_symbol(card, "lg")
@@ -133,7 +266,7 @@ def card_detail_dialog(card: UnitCard) -> ui.dialog:
                     if not card.owned:
                         chip("未入手", "red")
                 ui.label(card.name).classes("text-2xl font-bold")
-                ui.label(f"{card.echelon}・配備コスト {card.cost}・扱いやすさ {card.difficulty}").classes("muted text-sm")
+                ui.label(f"{card.echelon}・扱いやすさ {card.difficulty}").classes("muted text-sm")
         ui.separator().classes("bg-blue-grey-8 my-2")
         with ui.column().classes("gap-4"):
             with ui.column().classes("gap-1"):
@@ -145,12 +278,13 @@ def card_detail_dialog(card: UnitCard) -> ui.dialog:
             with ui.column().classes("gap-1"):
                 ui.label("相性がよい使い方").classes("blue-text text-xs font-bold")
                 ui.label(card.good_with).classes("section-subtitle")
-            with ui.column().classes("gap-1"):
-                ui.label("軍事メモ").classes("yellow-text text-xs font-bold")
-                ui.label(card.military_note).classes("section-subtitle")
-            with ui.element("div").classes("beginner-callout"):
-                ui.label("記号の見方").classes("font-bold")
-                ui.label("外側の枠は部隊、中央は主な役割、上側の文字は本作での部隊規模を示します。").classes("text-sm")
+            if preferences["explain_military_terms"]:
+                with ui.column().classes("gap-1 term-explanation"):
+                    ui.label("軍事メモ").classes("yellow-text text-xs font-bold")
+                    ui.label(card.military_note).classes("section-subtitle")
+                with ui.element("div").classes("beginner-callout term-explanation"):
+                    ui.label("記号の見方").classes("font-bold")
+                    ui.label("外側の枠は部隊、中央は主な役割、上側の文字は本作での部隊規模を示します。").classes("text-sm")
         secondary_button("閉じる", icon="close", on_click=dialog.close)
     return dialog
 
@@ -168,7 +302,6 @@ def unit_card(card: UnitCard, *, selected: bool = False,
             with ui.column().classes("gap-0 min-w-0"):
                 ui.label(card.branch).classes("unit-card__branch")
                 ui.label(card.name).classes("unit-card__name")
-            ui.label(str(card.cost)).classes("unit-card__cost").tooltip("配備コスト")
         with ui.element("div").classes("unit-card__symbol-area"):
             unit_symbol(card)
         ui.label(card.tagline).classes("unit-card__tagline")
@@ -235,6 +368,12 @@ def page_shell(active: str, eyebrow: str, title: str, subtitle: str) -> Iterator
     )
     ui.page_title(f"{title} | COMMAND GRID")
     ui.query("body").classes("cg-body")
+    player_state = ensure_player_state(app.storage.user)
+    preferences = dict(player_state["preferences"])
+    selected_symbol_id = str(player_state["profile"].get("selected_symbol", ""))
+    selected_symbol = SYMBOL_INDEX.get(selected_symbol_id)
+    profile_mark = selected_symbol.token if selected_symbol else str(player_state["profile"]["display_name"])[:2].upper()
+    apply_preferences(preferences)
 
     drawer = ui.left_drawer(value=False).props("width=246 breakpoint=1024 show-if-above bordered").classes("cg-drawer")
     with drawer:
@@ -258,22 +397,24 @@ def page_shell(active: str, eyebrow: str, title: str, subtitle: str) -> Iterator
                 ui.button(label, icon=icon, on_click=lambda path=route: go(path)).props(
                     "flat no-caps align=left"
                 ).classes(f"nav-button{active_class}")
-        with ui.element("div").classes("drawer-brief"):
-            with ui.row().classes("items-center gap-2"):
-                ui.label("初心者サポート ON").classes("font-bold text-xs")
-            ui.label("まず青いボタンだけ見れば進めます。詳しい説明は必要なときに開けます。")
+        if preferences["beginner_mode"]:
+            with ui.element("div").classes("drawer-brief beginner-only"):
+                with ui.row().classes("items-center gap-2"):
+                    ui.label("初心者サポート ON").classes("font-bold text-xs")
+                ui.label("まず青いボタンだけ見れば進めます。詳しい説明は必要なときに開けます。")
 
     with ui.header().classes("cg-header items-center no-wrap"):
         ui.button(icon="menu", on_click=drawer.toggle).props("flat round aria-label=メニュー")
+        ui.button(icon="home", on_click=lambda: go("/")).props("flat round aria-label=ホームへ戻る").tooltip("ホーム")
         with ui.row().classes("items-center no-wrap gap-3"):
             ui.label("CG").classes("brand-mark").style("width:34px;height:34px;flex-basis:34px;font-size:11px")
             with ui.column().classes("gap-0"):
                 ui.label("COMMAND GRID").classes("font-bold text-sm")
-                ui.label("統合戦線・UIプロトタイプ").classes("header-subtitle muted text-xs")
+                ui.label("統合戦線・ONLINE CARD GAME").classes("header-subtitle muted text-xs")
         ui.space()
         with ui.row().classes("items-center gap-2"):
-            chip("初心者モード", "green")
-            ui.button("OS", on_click=lambda: go("/profile")).props("round unelevated aria-label=プロフィール").classes(
+            chip("初心者モード" if preferences["beginner_mode"] else "標準表示", "green" if preferences["beginner_mode"] else "")
+            ui.button(profile_mark, on_click=lambda: go("/profile")).props("round unelevated aria-label=プロフィール").classes(
                 "bg-blue-9 text-white"
             )
 
@@ -289,8 +430,37 @@ def page_shell(active: str, eyebrow: str, title: str, subtitle: str) -> Iterator
         ).classes("disclaimer")
 
 
+@ui.page("/home")
 @ui.page("/")
 def home_page() -> None:
+    player = ensure_player_state(app.storage.user)
+    active_match = load_match(app.storage.user)
+    online_view = poll_multiplayer(app.storage.user)
+    online_status = str(online_view.get("status", "idle"))
+    online_active = online_status in {
+        "waiting", "waiting_friend", "playing", "complete", "opponent_left"
+    }
+    online_path = (
+        "/online" if online_status == "waiting"
+        else "/friend" if online_status == "waiting_friend"
+        else "/pvp"
+    )
+    stats = player["stats"]
+    rank_label = ("CADET I", "CADET II", "CADET III", "OFFICER I", "OFFICER II")[
+        min(4, stats["wins"] // 3)
+    ]
+    cta_label = (
+        "オンライン待機へ戻る" if online_status in {"waiting", "waiting_friend"}
+        else "オンライン対戦を続ける" if online_active
+        else "演習を続ける" if active_match and active_match.phase is not Phase.COMPLETE
+        else "5分演習を始める"
+    )
+
+    def home_primary_action() -> None:
+        if online_active:
+            go(online_path)
+            return
+        begin_training(reset=not (active_match and active_match.phase is not Phase.COMPLETE))
     with page_shell(
         "/", "START HERE", "まずはここから",
         "最初は青いボタンを一つ押すだけで大丈夫です。ほかの情報は必要になってから開けます。",
@@ -303,7 +473,9 @@ def home_page() -> None:
                     "覚えるのは『カードを選ぶ → 場所を選ぶ → 決定する』の3つだけ。"
                     "軍事用語や細かい数値は、まだ読まなくて構いません。"
                 ).classes("start-here__description")
-                primary_button("5分演習を始める", "/battle", "play_arrow").classes("start-here__button")
+                primary_button(
+                    cta_label, icon="play_arrow", on_click=home_primary_action,
+                ).classes("start-here__button")
             with ui.element("div").classes("start-here__steps"):
                 action_step(1, "カードを選ぶ", active=True)
                 action_step(2, "場所を選ぶ")
@@ -314,94 +486,17 @@ def home_page() -> None:
                 ui.icon("flag", size="28px").classes("blue-text")
                 with ui.column().classes("gap-0"):
                     ui.label("ゲームの目的").classes("font-bold")
-                    ui.label("左・中央・右の3か所から、2か所を取れば勝ちです。").classes("section-subtitle")
+                    ui.label("6ラウンド後に、相手より多くの戦線を取れば勝ちです。").classes("section-subtitle")
 
         with ui.expansion("ほかの情報を見る", icon="unfold_more").classes("details-expansion"):
             with ui.element("div").classes("metric-grid mt-3"):
-                metric_card("現在のランク", "CADET II", "次のランクまで 120", "blue-text")
-                metric_card("カード図鑑", "12 / 18", "基本6兵科は発見済み")
-                metric_card("今週の対戦", "7 戦", "4勝・3敗", "green-text")
-                metric_card("得意な役割", "偵察", "相手を見つける", "yellow-text")
+                metric_card("プレイヤー階級", rank_label, f"勝利 {stats['wins']}回", "blue-text")
+                metric_card("カード図鑑", f"{len(player['collection']['owned_cards'])} / {len(CARDS)}", "対戦完了ごとに増えます")
+                metric_card("対戦記録", f"{stats['battles_played']} 戦", f"{stats['wins']}勝・{stats['losses']}敗", "green-text")
+                metric_card("記号図鑑", f"{len(player['collection']['unlocked_symbols'])} / {len(SYMBOL_CATALOG)}", "一度に覚えなくて大丈夫", "yellow-text")
             with ui.row().classes("gap-3 mt-4"):
                 secondary_button("通常対戦へ", "/lobby", "swords")
                 secondary_button("カードを見る", "/cards", "style")
-                secondary_button("詳しいホームを見る", "/legacy-home", "dashboard")
-
-
-@ui.page("/legacy-home")
-def legacy_home_page() -> None:
-    with page_shell(
-        "/", "OPERATIONS DESK", "作戦室へようこそ",
-        "軍事知識は必要ありません。『見る・守る・支える』から始めて、3つの戦線を確保しましょう。",
-    ):
-        with ui.element("section").classes("hero"):
-            with ui.element("div").classes("hero-main"):
-                with ui.column().classes("hero-copy gap-0"):
-                    ui.label("TACTICAL CARD GAME / 1 VS 1").classes("hero-kicker")
-                    ui.label("記号を読み、役割を組み合わせ、戦線を確保する。").classes("hero-title")
-                    ui.label(
-                        "歩兵が場所を取り、偵察が相手を見つけ、砲兵が後ろから助けます。"
-                        "カードの仕事を読むだけで遊べる、同時命令型の対戦ゲームです。"
-                    ).classes("hero-description")
-                    with ui.row().classes("gap-3 mt-6"):
-                        primary_button("5分でわかる演習", "/learn", "school")
-                        secondary_button("対戦を始める", "/lobby", "swords")
-            with ui.card().classes("panel panel--strong"):
-                with ui.row().classes("w-full items-center justify-between"):
-                    ui.label("現在の任務").classes("font-bold")
-                    chip("初任務", "yellow")
-                ui.label("6つの役割を試す").classes("text-xl font-bold mt-2")
-                ui.label("演習または対戦で、歩兵・機甲・偵察・砲兵・工兵・兵站を1回ずつ使います。").classes("section-subtitle")
-                ui.linear_progress(value=4 / 6).props("rounded size=8px").classes("progress-track mt-4")
-                with ui.row().classes("w-full justify-between muted text-xs"):
-                    ui.label("4 / 6 兵科")
-                    ui.label("報酬：青図フレーム")
-                ui.separator().classes("bg-blue-grey-8 my-3")
-                with ui.row().classes("w-full items-center justify-between"):
-                    with ui.column().classes("gap-0"):
-                        ui.label("前回の対戦").classes("muted text-xs")
-                        ui.label("ラウンド 4 / 6・中央で優勢").classes("text-sm font-bold")
-                    ui.button(icon="arrow_forward", on_click=lambda: go("/battle")).props("round flat aria-label=対戦に戻る")
-
-        with ui.element("div").classes("metric-grid"):
-            metric_card("現在のランク", "CADET II", "次のランクまで 120", "blue-text")
-            metric_card("カード図鑑", "12 / 18", "ゲームカード収集率 67%")
-            metric_card("今週の対戦", "7 戦", "4勝・3敗", "green-text")
-            metric_card("主な役割", "偵察", "相手を見つけるのが得意", "yellow-text")
-
-        with ui.element("div").classes("content-grid"):
-            with ui.card().classes("panel"):
-                section_heading("このゲームは何をするの？", "最初に覚えるのは3つだけです。")
-                with ui.element("div").classes("three-grid mt-4"):
-                    for number, heading, body in (
-                        ("01", "3つの戦線に置く", "手札から部隊を選び、左・中央・右のどこかへ配置します。"),
-                        ("02", "命令を同時公開", "相手も同時に選んでいるため、何をしてくるか予想します。"),
-                        ("03", "2つ以上を確保", "6ラウンド後に多くの戦線を取った側が作戦成功です。"),
-                    ):
-                        with ui.card().classes("step-card"):
-                            ui.label(number).classes("step-number")
-                            ui.label(heading).classes("font-bold")
-                            ui.label(body).classes("section-subtitle mt-2")
-            with ui.card().classes("panel"):
-                section_heading("覚え方", "6つの仕事は一つの文章で覚えられます。")
-                with ui.element("div").classes("beginner-callout mt-4"):
-                    ui.label("歩兵が取り、偵察が見つけ、砲兵が助ける。").classes("font-bold text-lg")
-                    ui.label("工兵が整え、兵站が支え、機甲が突破します。").classes("text-sm mt-1")
-                secondary_button("6つの役割を見る", "/learn", "menu_book").classes("mt-3")
-
-        section_heading("おすすめの始め方", "まずは分かりやすいスターターデッキから。")
-        with ui.element("div").classes("three-grid"):
-            for title, level, body, icon in (
-                ("はじめての統合部隊", "かんたん", "6つの役割を少しずつ試せる、迷いにくい基本デッキ。", "extension"),
-                ("見つけて支援", "ふつう", "偵察で相手を見つけ、砲兵で支援する情報重視のデッキ。", "visibility"),
-                ("守って前進", "かんたん", "歩兵と工兵で戦線を確保し、少しずつ前へ進むデッキ。", "shield"),
-            ):
-                with ui.card().classes("lobby-mode"):
-                    with ui.row().classes("w-full justify-between items-start"):
-                        ui.icon(icon, size="28px").classes("blue-text")
-                        chip(level, "green" if level == "かんたん" else "yellow")
-                    ui.label(title).classes("text-lg font-bold mt-2")
-                    ui.label(body).classes("section-subtitle")
 
 
 @ui.page("/learn")
@@ -415,7 +510,7 @@ def learn_page() -> None:
                 ui.icon("flag", size="28px")
                 with ui.column().classes("gap-0"):
                     ui.label("目的").classes("page-eyebrow")
-                    ui.label("左・中央・右のうち、2か所を取る").classes("text-xl font-bold")
+                    ui.label("左・中央・右で、相手より多く取る").classes("text-xl font-bold")
 
         with ui.element("div").classes("three-grid"):
             for number, title, description in (
@@ -428,7 +523,7 @@ def learn_page() -> None:
                     ui.label(title).classes("font-bold text-lg")
                     ui.label(description).classes("section-subtitle mt-2")
 
-        primary_button("実際に1枚置いてみる", "/battle", "play_arrow")
+        primary_button("実際に1枚置いてみる", icon="play_arrow", on_click=lambda: begin_training())
 
         with ui.expansion("6つのカードの仕事を見る", icon="extension").classes("details-expansion"):
             with ui.element("div").classes("role-grid mt-3"):
@@ -481,7 +576,7 @@ def advanced_learn_page() -> None:
                     ui.label(explanation).classes("section-subtitle px-4 pb-4")
 
         with ui.row().classes("gap-3"):
-            primary_button("演習を始める", "/battle", "play_arrow")
+            primary_button("演習を始める", icon="play_arrow", on_click=lambda: begin_training())
             secondary_button("カード図鑑を見る", "/cards", "style")
 
 
@@ -491,6 +586,8 @@ def cards_page() -> None:
         "/cards", "COLLECTION", "まず覚える6枚",
         "最初は、それぞれの『仕事』だけ見れば十分です。数値や専門的な説明は、カードを開いたときだけ表示します。",
     ):
+        player = ensure_player_state(app.storage.user)
+        owned_cards = set(player["collection"]["owned_cards"])
         with ui.element("div").classes("focus-banner"):
             with ui.row().classes("items-start gap-3 no-wrap"):
                 ui.icon("lightbulb", size="26px")
@@ -498,7 +595,7 @@ def cards_page() -> None:
                     ui.label("この6枚だけで演習を始められます").classes("font-bold text-lg")
                     ui.label("歩兵が取り、偵察が見つけ、砲兵が助ける。工兵が整え、兵站が支え、機甲が突破します。").classes("text-sm")
 
-        core_cards = [next(card for card in CARDS if card.branch == role and card.owned) for role in ROLE_INFO]
+        core_cards = [next(card for card in CARDS if card.branch == role and card.id in owned_cards) for role in ROLE_INFO]
         with ui.element("div").classes("beginner-card-grid"):
             for card in core_cards:
                 beginner_card(card)
@@ -507,7 +604,9 @@ def cards_page() -> None:
             with ui.row().classes("w-full items-center justify-between gap-4"):
                 with ui.column().classes("gap-1"):
                     ui.label("もっと見たいときだけ開く").classes("font-bold")
-                    ui.label("全18枚のカード検索と、送っていただいた画像の全記号ライブラリを分けて用意しました。").classes("section-subtitle")
+                    ui.label(
+                        f"カード {len(owned_cards)} / {len(CARDS)}枚、記号 {len(player['collection']['unlocked_symbols'])} / {len(SYMBOL_CATALOG)}種類を収集中です。"
+                    ).classes("section-subtitle")
                 with ui.row().classes("gap-2"):
                     secondary_button("全カードを見る", "/advanced-cards", "style")
                     secondary_button(f"全記号を見る（{len(SYMBOL_CATALOG)}）", "/symbols", "account_tree")
@@ -519,6 +618,8 @@ def symbols_page() -> None:
         "/cards", "SYMBOL LIBRARY", "全記号ライブラリ",
         "ここはコレクションを深く見たい人向けです。遊ぶために全部を覚える必要はありません。",
     ):
+        player = ensure_player_state(app.storage.user)
+        unlocked_symbols = set(player["collection"]["unlocked_symbols"])
         with ui.element("div").classes("beginner-callout beginner-callout--yellow"):
             with ui.row().classes("items-center justify-between gap-4 w-full"):
                 with ui.column().classes("gap-1"):
@@ -533,6 +634,23 @@ def symbols_page() -> None:
             catalog_state["family"] = event.value
             family_view.refresh()
 
+        def try_division() -> None:
+            state = update_state_formation(ensure_player_state(app.storage.user), "division")
+            store_player_state(app.storage.user, state)
+            begin_training()
+
+        def select_emblem(symbol_id: str) -> None:
+            try:
+                state = update_state_selected_symbol(
+                    ensure_player_state(app.storage.user), symbol_id
+                )
+            except ValueError as error:
+                ui.notify(str(error), type="warning")
+                return
+            store_player_state(app.storage.user, state)
+            family_view.refresh()
+            ui.notify("プロフィール章を変更しました。", type="positive")
+
         ui.select(
             list(family_by_name), value=catalog_state["family"], label="見る分類を1つ選ぶ",
             on_change=change_family,
@@ -540,6 +658,9 @@ def symbols_page() -> None:
 
         @ui.refreshable
         def family_view() -> None:
+            current_selected = str(
+                ensure_player_state(app.storage.user)["profile"].get("selected_symbol", "")
+            )
             family = family_by_name[catalog_state["family"]]
             symbols = symbols_for_family(family.id)
             with ui.card().classes("panel symbol-family-panel"):
@@ -549,6 +670,7 @@ def symbols_page() -> None:
                         with ui.row().classes("items-center gap-2"):
                             ui.label(family.name).classes("section-title")
                             chip(f"{len(symbols)}種類")
+                            chip(f"解放 {sum(symbol.id in unlocked_symbols for symbol in symbols)}", "green")
                         ui.label(family.plain_role).classes("section-subtitle")
                         with ui.row().classes("gap-2 mt-1"):
                             chip(family.play_kind.value, "green")
@@ -564,6 +686,19 @@ def symbols_page() -> None:
                             with ui.column().classes("gap-0 min-w-0"):
                                 ui.label(symbol.name).classes("font-bold text-sm")
                                 ui.label(symbol.play_kind.value).classes("muted text-xs")
+                            if symbol.id == current_selected:
+                                chip("使用中", "yellow")
+                            elif symbol.id in unlocked_symbols:
+                                ui.button(
+                                    "章にする", icon="verified",
+                                    on_click=lambda sid=symbol.id: select_emblem(sid),
+                                ).props("flat dense no-caps").classes("symbol-try-button")
+                            else:
+                                chip("未解放", "")
+                            if symbol.id == "echelon_05":
+                                ui.button(
+                                    "師団編制を使う", icon="play_arrow", on_click=try_division,
+                                ).props("flat no-caps").classes("symbol-try-button")
 
         family_view()
 
@@ -574,18 +709,29 @@ def symbols_page() -> None:
                     ui.label(label).classes("font-bold text-sm")
                     chip(f"{count}記号")
 
+        with ui.expansion("参照画像で全記号を確認", icon="image").classes("details-expansion"):
+            ui.label(
+                "送っていただいた早見表を原寸のまま収録しています。図鑑の201項目はこの画像の分類と対応します。"
+            ).classes("section-subtitle mt-2")
+            ui.image("/static/reference-symbols.png").props("fit=contain").classes(
+                "w-full mt-3 rounded-borders bg-white"
+            )
+
 
 @ui.page("/advanced-cards")
 def advanced_cards_page() -> None:
     with page_shell(
-        "/cards", "COLLECTION / 12 OF 18", "カード図鑑",
+        "/cards", f"COLLECTION / 12 OF {len(CARDS)}", "カード図鑑",
         "未入手のカードも能力と入手方法を確認できます。レア度は強さの順位ではありません。",
     ):
+        player = ensure_player_state(app.storage.user)
+        owned_cards = set(player["collection"]["owned_cards"])
+        unlocked_symbols = set(player["collection"]["unlocked_symbols"])
         with ui.element("div").classes("metric-grid"):
-            metric_card("ゲームカード", "12 / 18", "未入手も能力を確認できます", "blue-text")
+            metric_card("ゲームカード", f"{len(owned_cards)} / {len(CARDS)}", "対戦完了ごとに1枚解放", "blue-text")
             metric_card("兵科図鑑", "6 / 6", "初期6兵科を発見済み", "green-text")
-            metric_card("編制セット", "2 / 8", "次は『偵察支援群』")
-            metric_card("外観コレクション", "7 / 24", "強さには影響しません", "yellow-text")
+            metric_card("編制規模", f"{len(player['collection']['unlocked_formations'])} / {len(FORMATION_SCALES)}", "大隊・旅団・師団を表示")
+            metric_card("記号コレクション", f"{len(unlocked_symbols)} / {len(SYMBOL_CATALOG)}", "対戦ごとに最大12種類解放", "yellow-text")
 
         filter_state = {"query": "", "branch": "すべて"}
 
@@ -631,7 +777,7 @@ def advanced_cards_page() -> None:
                 return
             with ui.element("div").classes("unit-card-grid"):
                 for card in visible:
-                    unit_card(card)
+                    unit_card(replace(card, owned=card.id in owned_cards))
 
         card_grid()
 
@@ -642,16 +788,22 @@ def deck_page() -> None:
         "/deck", "FORCE BUILDER", "デッキ編成",
         "役割の違うカードを組み合わせて、自分の部隊を作ります。実際の軍隊編制ではなくゲーム用の構成です。",
     ):
-        app.storage.user.setdefault("deck", list(STARTER_DECK))
+        ensure_player_state(app.storage.user)
 
         def update_deck(new_deck: list[str], message: str | None = None) -> None:
-            app.storage.user["deck"] = new_deck
+            state = ensure_player_state(app.storage.user)
+            try:
+                state = update_state_deck(state, new_deck)
+            except ValueError as error:
+                ui.notify(str(error), type="negative")
+                return
+            store_player_state(app.storage.user, state)
             deck_view.refresh()
             if message:
                 ui.notify(message, type="positive")
 
         def add_card(card_id: str) -> None:
-            deck = list(app.storage.user.get("deck", []))
+            deck = list(ensure_player_state(app.storage.user)["deck"])
             if len(deck) >= 12:
                 ui.notify("デッキは12枚までです。先に1枚外してください。", type="warning")
                 return
@@ -662,14 +814,24 @@ def deck_page() -> None:
             update_deck(deck)
 
         def remove_card(card_id: str) -> None:
-            deck = list(app.storage.user.get("deck", []))
+            deck = list(ensure_player_state(app.storage.user)["deck"])
             if card_id in deck:
                 deck.remove(card_id)
                 update_deck(deck)
 
+        def use_current_deck() -> None:
+            deck = ensure_player_state(app.storage.user)["deck"]
+            if len(deck) < 6:
+                ui.notify("対戦にはカードを6枚以上入れてください。", type="warning")
+                return
+            ui.notify("このデッキを使用します。", type="positive")
+            go("/lobby")
+
         @ui.refreshable
         def deck_view() -> None:
-            deck_ids = list(app.storage.user.get("deck", list(STARTER_DECK)))
+            player = ensure_player_state(app.storage.user)
+            deck_ids = list(player["deck"])
+            owned_cards = set(player["collection"]["owned_cards"])
             analysis = analyze_deck(deck_ids)
             with ui.element("div").classes("deck-layout"):
                 with ui.card().classes("panel"):
@@ -687,7 +849,7 @@ def deck_page() -> None:
                                     add = ui.button(
                                         icon="add", on_click=lambda card_id=card.id: add_card(card_id)
                                     ).props("round flat aria-label=カードを追加")
-                                    if not card.owned or card.id in deck_ids or len(deck_ids) >= 12:
+                                    if card.id not in owned_cards or card.id in deck_ids or len(deck_ids) >= 12:
                                         add.props("disable")
 
                 with ui.column().classes("w-full gap-4"):
@@ -695,7 +857,7 @@ def deck_page() -> None:
                         with ui.row().classes("w-full items-start justify-between"):
                             with ui.column().classes("gap-0"):
                                 ui.label("はじめての統合部隊").classes("section-title")
-                                ui.label(f"{analysis['count']} / 12枚・合計コスト {analysis['cost']}").classes("section-subtitle")
+                                ui.label(f"{analysis['count']} / 12枚").classes("section-subtitle")
                             chip("使用中", "green")
                         ui.linear_progress(value=min(1, analysis["count"] / 12)).props("rounded size=8px").classes("progress-track mt-3")
                         with ui.column().classes("w-full gap-2 mt-4"):
@@ -713,7 +875,7 @@ def deck_page() -> None:
                         for tip in analysis["tips"]:
                             ui.label(tip).classes("deck-tip")
                         with ui.row().classes("gap-2 mt-3"):
-                            primary_button("保存して使用", icon="save", on_click=lambda: ui.notify("デッキを保存しました。", type="positive"))
+                            primary_button("このデッキで遊ぶ", icon="play_arrow", on_click=use_current_deck)
                             secondary_button(
                                 "元に戻す", icon="restart_alt",
                                 on_click=lambda: update_deck(list(STARTER_DECK), "スターターデッキに戻しました。"),
@@ -731,12 +893,37 @@ def deck_page() -> None:
                                         unit_symbol(card, "sm")
                                         with ui.column().classes("gap-0 flex-1"):
                                             ui.label(card.name).classes("font-bold text-sm")
-                                            ui.label(f"{card.branch}・コスト {card.cost}").classes("muted text-xs")
+                                            ui.label(f"{card.branch}・{card.echelon}").classes("muted text-xs")
                                         ui.button(
                                             icon="remove", on_click=lambda cid=card_id: remove_card(cid)
                                         ).props("round flat aria-label=カードを外す")
 
+        def select_formation(formation_id: str) -> None:
+            state = update_state_formation(
+                ensure_player_state(app.storage.user), get_formation(formation_id).id
+            )
+            store_player_state(app.storage.user, state)
+            formation_view.refresh()
+            ui.notify(f"編制規模を{get_formation(formation_id).name}にしました。", type="positive")
+
+        @ui.refreshable
+        def formation_view() -> None:
+            current = get_formation(ensure_player_state(app.storage.user)["selected_formation"])
+            with ui.expansion("編制規模（任意）", icon="account_tree").classes("details-expansion"):
+                ui.label(
+                    "兵科は『仕事』、師団や旅団は『大きさ』です。編制規模を変えてもカードの強さは変わりません。"
+                ).classes("section-subtitle mt-2")
+                with ui.row().classes("gap-2 mt-3"):
+                    for formation in FORMATION_SCALES:
+                        selected_class = " primary-button" if formation.id == current.id else " secondary-button"
+                        label = formation.name if formation.id == "native" else f"{formation.marker} {formation.name}"
+                        ui.button(
+                            label, on_click=lambda fid=formation.id: select_formation(fid),
+                        ).props("no-caps unelevated").classes(selected_class)
+                ui.label(f"現在：{current.name}").classes("blue-text text-sm font-bold mt-3")
+
         deck_view()
+        formation_view()
 
 
 @ui.page("/lobby")
@@ -745,12 +932,27 @@ def lobby_page() -> None:
         "/lobby", "PLAY", "何をするか一つ選ぶ",
         "初めてなら演習がおすすめです。勝敗や時間を気にせず操作を試せます。",
     ):
+        def choose_mode(mode: str) -> None:
+            if mode == "training":
+                begin_training()
+                return
+            state = update_state_mode(ensure_player_state(app.storage.user), mode)
+            store_player_state(app.storage.user, state)
+            if mode in {"casual", "ranked"}:
+                go("/online")
+                return
+            if mode == "friend":
+                go("/friend")
+                return
+
         with ui.element("section").classes("start-here start-here--compact"):
             with ui.column().classes("start-here__copy gap-2"):
                 chip("おすすめ", "green")
                 ui.label("初心者演習").classes("start-here__title")
                 ui.label("相手は練習用です。時間制限なしで、カードを置くところから始めます。").classes("start-here__description")
-                primary_button("演習を始める", "/battle", "play_arrow").classes("start-here__button")
+                primary_button(
+                    "演習を始める", icon="play_arrow", on_click=lambda: choose_mode("training"),
+                ).classes("start-here__button")
             with ui.card().classes("panel panel--compact"):
                 ui.label("使用デッキ").classes("muted text-xs")
                 ui.label("はじめての統合部隊").classes("font-bold")
@@ -759,15 +961,19 @@ def lobby_page() -> None:
 
         with ui.expansion("ほかの遊び方", icon="unfold_more").classes("details-expansion"):
             with ui.element("div").classes("three-grid mt-3"):
-                for title, description, icon in (
-                    ("カジュアル対戦", "勝敗を気にせず、他のプレイヤーと遊ぶ予定のモードです。", "public"),
-                    ("ランク対戦", "実力が近い相手と競う予定のモードです。", "leaderboard"),
-                    ("フレンド対戦", "招待URLを使って友人と遊ぶ予定のモードです。", "group"),
+                for mode, title, description, icon in (
+                    ("casual", "オンライン対戦", "待機中のプレイヤーと気軽に対戦します。", "public"),
+                    ("ranked", "ランク対戦", "オンラインの勝敗を戦績へ記録します。", "leaderboard"),
+                    ("friend", "フレンド対戦", "6文字の合言葉で友人と同じ部屋へ入ります。", "group"),
                 ):
                     with ui.card().classes("lobby-mode"):
                         ui.icon(icon, size="28px").classes("blue-text")
                         ui.label(title).classes("font-bold text-lg mt-2")
                         ui.label(description).classes("section-subtitle")
+                        ui.button(
+                            "このモードで遊ぶ", icon="play_arrow",
+                            on_click=lambda selected_mode=mode: choose_mode(selected_mode),
+                        ).props("flat no-caps").classes("card-action")
             secondary_button("詳しい対戦準備画面を見る", "/advanced-lobby", "tune").classes("mt-3")
 
 
@@ -777,23 +983,25 @@ def advanced_lobby_page() -> None:
         "/lobby", "MATCH CONTROL", "対戦の準備",
         "遊ぶモードとデッキを選びます。最初は時間制限のない演習がおすすめです。",
     ):
-        with ui.dialog() as match_dialog, ui.card().classes("dialog-card"):
-            with ui.column().classes("w-full items-center text-center gap-3"):
-                ui.spinner("dots", size="54px", color="primary")
-                ui.label("対戦相手が見つかりました").classes("text-2xl font-bold")
-                ui.label("Aoi-17・CADET II").classes("muted")
-                with ui.element("div").classes("beginner-callout"):
-                    ui.label("6ラウンド / 3戦線 / 同時命令").classes("font-bold")
-                    ui.label("勝利条件：2つの戦線を確保、または任務点5点").classes("text-sm")
-                primary_button("準備完了", "/battle", "check_circle")
-                secondary_button("戻る", icon="close", on_click=match_dialog.close)
+        def select_mode(mode: str) -> None:
+            if mode == "training":
+                begin_training()
+                return
+            state = update_state_mode(ensure_player_state(app.storage.user), mode)
+            store_player_state(app.storage.user, state)
+            if mode in {"casual", "ranked"}:
+                go("/online")
+                return
+            if mode == "friend":
+                go("/friend")
+                return
 
         section_heading("遊ぶモード", "カードの性能はどのモードでも同じです。")
         with ui.element("div").classes("three-grid"):
-            for title, badge, body, icon, recommended in (
-                ("演習", "ひとり用", "ゆっくり操作を覚えられます。時間制限もありません。", "school", True),
-                ("カジュアル対戦", "オンライン", "勝敗を気にせず、他のプレイヤーと遊びます。", "public", False),
-                ("ランク対戦", "競技", "実力が近い相手と競い、ランクを上げます。", "leaderboard", False),
+            for mode, title, badge, body, icon, recommended in (
+                ("training", "演習", "ひとり用", "ゆっくり操作を覚えられます。時間制限もありません。", "school", True),
+                ("casual", "オンライン対戦", "対人", "待機中の別プレイヤーとリアルタイムで遊びます。", "public", False),
+                ("ranked", "ランク対戦", "競技", "オンラインの勝敗を戦績に記録します。", "leaderboard", False),
             ):
                 with ui.card().classes("lobby-mode"):
                     with ui.row().classes("w-full items-start justify-between"):
@@ -801,7 +1009,9 @@ def advanced_lobby_page() -> None:
                         chip("おすすめ" if recommended else badge, "green" if recommended else "")
                     ui.label(title).classes("text-xl font-bold mt-2")
                     ui.label(body).classes("section-subtitle")
-                    ui.button("このモードを選ぶ", on_click=match_dialog.open).props("flat no-caps").classes("card-action")
+                    ui.button(
+                        "このモードを選ぶ", on_click=lambda selected_mode=mode: select_mode(selected_mode),
+                    ).props("flat no-caps").classes("card-action")
 
         with ui.element("div").classes("content-grid"):
             with ui.card().classes("panel"):
@@ -816,162 +1026,435 @@ def advanced_lobby_page() -> None:
                     secondary_button("デッキを確認", "/deck", "view_carousel")
                 ui.separator().classes("bg-blue-grey-8 my-4")
                 with ui.row().classes("gap-3"):
-                    primary_button("このデッキで対戦", icon="swords", on_click=match_dialog.open)
-                    secondary_button("初心者ヒント ON", icon="tips_and_updates", on_click=lambda: ui.notify("対戦中もおすすめ行動を表示します。"))
+                    primary_button(
+                        "このデッキで対戦", icon="swords",
+                        on_click=lambda: select_mode(str(ensure_player_state(app.storage.user)["selected_mode"])),
+                    )
+                    secondary_button("ヒント設定", "/settings", "tips_and_updates")
             with ui.card().classes("panel"):
                 section_heading("フレンド対戦", "合言葉または招待URLで友人と遊べます。")
-                ui.label("GRID-4821").classes("mono text-3xl font-bold blue-text mt-3")
-                ui.label("参加者を待っています（1 / 2）").classes("section-subtitle")
-
-                def copy_invite() -> None:
-                    ui.run_javascript("navigator.clipboard.writeText(window.location.origin + '/lobby?code=GRID-4821')")
-                    ui.notify("招待URLをコピーしました。", type="positive")
-
-                secondary_button("招待URLをコピー", icon="content_copy", on_click=copy_invite).classes("mt-3")
+                ui.label("部屋を作る側と参加する側で、同じ6文字の合言葉を使います。").classes("section-subtitle mt-3")
+                primary_button("フレンド部屋を開く", icon="group", on_click=lambda: select_mode("friend")).classes("mt-3")
 
 
-def initial_battle_state() -> dict[str, object]:
-    return {
-        "round": 2,
-        "selected": None,
-        "planned_lane": None,
-        "complete": False,
-        "mission_points": 2,
-        "lanes": {
-            "left": {"friendly": 3, "enemy": 2, "unit": "第1歩兵中隊", "unknown": True},
-            "center": {"friendly": 2, "enemy": 3, "unit": "第2工兵中隊", "unknown": True},
-            "right": {"friendly": 1, "enemy": 1, "unit": "前線補給中隊", "unknown": False},
-        },
-        "log": [
-            "第1ラウンド：左戦線に第1歩兵中隊を配置しました。",
-            "中央戦線に未確認部隊を確認。偵察すると正体が分かります。",
-            "右戦線は現在互角です。",
-        ],
-    }
+@ui.page("/online")
+def online_queue_page() -> None:
+    user_storage = app.storage.user
+    abandon_match(user_storage)
+    user_storage.pop("battle_selection", None)
+    player = ensure_player_state(app.storage.user)
+    mode = str(player["selected_mode"])
+    if mode not in {"casual", "ranked"}:
+        mode = "casual"
+        player = update_state_mode(player, mode)
+        store_player_state(app.storage.user, player)
+    display_name = str(player["profile"]["display_name"])
+    mode_label = "ランク対戦" if mode == "ranked" else "オンライン対戦"
 
+    try:
+        existing_online = poll_multiplayer(app.storage.user)
+        if existing_online.get("status") == "left":
+            close_multiplayer_session(app.storage.user)
+        initial_view = join_queue(app.storage.user, mode, name=display_name)
+    except MultiplayerError as error:
+        initial_view = {"status": "error", "message": str(error)}
 
-@ui.page("/battle")
-def battle_page() -> None:
+    def cancel_queue() -> None:
+        try:
+            cancel_waiting(app.storage.user)
+        except MultiplayerError:
+            pass
+        go("/lobby")
+
+    def cleanup_queue_on_delete() -> None:
+        try:
+            cancel_waiting(user_storage)
+        except MultiplayerError:
+            pass
+
     with page_shell(
-        "/lobby", "LIVE OPERATION", "第04演習区域・対戦中",
-        "カードを1枚選び、配置する戦線を選んでから命令を確定します。",
+        "/lobby", "MATCHMAKING", f"{mode_label}・相手を検索中",
+        "同じモードで待っている別のブラウザと、自動で組み合わせます。",
     ):
-        app.storage.user.setdefault("battle", initial_battle_state())
-        hand_ids = ("recon_1", "infantry_2", "artillery_1", "armor_1", "logistics_1")
-
-        def mutate(**changes) -> dict[str, object]:
-            state = dict(app.storage.user.get("battle", initial_battle_state()))
-            state.update(changes)
-            app.storage.user["battle"] = state
-            return state
-
-        def select_card(card_id: str) -> None:
-            mutate(selected=card_id)
-            battle_board.refresh()
-
-        def plan_lane(lane_id: str) -> None:
-            state = app.storage.user.get("battle", initial_battle_state())
-            if not state.get("selected"):
-                ui.notify("先に手札からカードを選んでください。", type="warning")
+        @ui.refreshable
+        def waiting_panel() -> None:
+            view = poll_multiplayer(app.storage.user)
+            if view.get("status") in {"playing", "complete", "opponent_left"}:
+                ui.label("対戦相手が見つかりました。盤面を開きます…").classes("green-text font-bold")
+                go("/pvp")
                 return
-            mutate(planned_lane=lane_id)
-            battle_board.refresh()
-
-        def confirm_order() -> None:
-            state = dict(app.storage.user.get("battle", initial_battle_state()))
-            card_id = state.get("selected")
-            lane_id = state.get("planned_lane")
-            if not card_id or not lane_id:
-                ui.notify("カードと配置先の戦線を選んでください。", type="warning")
+            if view.get("status") == "waiting_friend":
+                ui.label("フレンド部屋の待機画面へ戻ります…").classes("blue-text font-bold")
+                go("/friend")
                 return
-            card = get_card(str(card_id))
-            lanes = {key: dict(value) for key, value in state["lanes"].items()}
-            lane = lanes[str(lane_id)]
-            gain = max(1, card.control + card.support)
-            lane["friendly"] += gain
-            lane["unit"] = card.name
-            if card.branch == "偵察":
-                lane["unknown"] = False
-            logs = list(state["log"])
-            lane_names = {"left": "左戦線", "center": "中央戦線", "right": "右戦線"}
-            logs.insert(0, f"第{state['round']}ラウンド：{card.name}を{lane_names[str(lane_id)]}へ配置。制圧・支援が{gain}増えました。")
-            next_round = int(state["round"]) + 1
-            complete = next_round > 6
-            state.update(
-                lanes=lanes,
-                log=logs[:6],
-                round=min(next_round, 6),
-                selected=None,
-                planned_lane=None,
-                complete=complete,
-                mission_points=min(5, int(state["mission_points"]) + (1 if gain >= 4 else 0)),
-            )
-            app.storage.user["battle"] = state
-            ui.notify("命令を公開し、結果を解決しました。", type="positive")
-            battle_board.refresh()
+            if view.get("status") == "idle" and initial_view.get("status") == "error":
+                with ui.card().classes("panel"):
+                    ui.icon("error_outline", size="38px").classes("danger-text")
+                    ui.label("マッチングを開始できませんでした").classes("text-xl font-bold")
+                    ui.label(str(initial_view.get("message", "もう一度お試しください。"))).classes("section-subtitle")
+                    secondary_button("ロビーへ戻る", "/lobby", "arrow_back").classes("mt-3")
+                return
+            with ui.card().classes("panel panel--strong"):
+                with ui.column().classes("w-full items-center text-center gap-3 py-5"):
+                    ui.spinner("dots", size="58px", color="primary")
+                    ui.label("対戦相手を待っています").classes("text-2xl font-bold")
+                    ui.label(f"モード：{mode_label} / 名前：{display_name}").classes("section-subtitle")
+                    if view.get("queue_position"):
+                        chip(f"待機順 {view['queue_position']}", "yellow")
+                    ui.label("この画面を開いた別のプレイヤーが来ると自動で開始します。").classes("muted text-xs")
+                    secondary_button("待機をやめる", icon="close", on_click=cancel_queue)
 
-        def reset_battle() -> None:
-            app.storage.user["battle"] = initial_battle_state()
-            battle_board.refresh()
-            ui.notify("演習を最初の状態に戻しました。")
+        waiting_panel()
+
+        def poll_queue() -> None:
+            view = poll_multiplayer(app.storage.user)
+            if view.get("status") in {"playing", "complete", "opponent_left"}:
+                go("/pvp")
+            else:
+                waiting_panel.refresh()
+
+        register_client_poll(poll_queue, cleanup=cleanup_queue_on_delete)
+
+
+@ui.page("/friend")
+def friend_room_page() -> None:
+    user_storage = app.storage.user
+    abandon_match(user_storage)
+    user_storage.pop("battle_selection", None)
+    player = ensure_player_state(app.storage.user)
+    if player["selected_mode"] != "friend":
+        player = update_state_mode(player, "friend")
+        player = store_player_state(app.storage.user, player)
+    display_name = str(player["profile"]["display_name"])
+    room_state: dict[str, object] = {"message": ""}
+
+    existing_friend = poll_multiplayer(app.storage.user)
+    if existing_friend.get("status") == "left":
+        try:
+            close_multiplayer_session(app.storage.user)
+        except MultiplayerError:
+            pass
+
+    def create_room() -> None:
+        try:
+            create_friend_room(app.storage.user, name=display_name)
+        except MultiplayerError as error:
+            room_state["message"] = str(error)
+            ui.notify(str(error), type="negative")
+        room_panel.refresh()
+
+    def join_room() -> None:
+        code = str(code_input.value or "").strip().upper()
+        if not code:
+            ui.notify("6文字の合言葉を入力してください。", type="warning")
+            return
+        try:
+            join_friend_room(app.storage.user, code, name=display_name)
+        except MultiplayerError as error:
+            room_state["message"] = "合言葉が違うか、その部屋はすでに開始しています。"
+            ui.notify(room_state["message"], type="negative")
+            room_panel.refresh()
+            return
+        go("/pvp")
+
+    def cancel_room() -> None:
+        try:
+            cancel_waiting(app.storage.user)
+        except MultiplayerError:
+            pass
+        go("/lobby")
+
+    def cleanup_room_on_delete() -> None:
+        try:
+            cancel_waiting(user_storage)
+        except MultiplayerError:
+            pass
+
+    with page_shell(
+        "/lobby", "PRIVATE MATCH", "フレンド対戦",
+        "部屋を作って合言葉を渡すか、友人から受け取った合言葉で参加します。",
+    ):
+        code_input = ui.input("友人から受け取った6文字", placeholder="例：A7K2PX").props(
+            "outlined maxlength=6"
+        ).classes("filter-control w-full max-w-md")
 
         @ui.refreshable
-        def battle_board() -> None:
-            state = app.storage.user.get("battle", initial_battle_state())
-            selected_id = state.get("selected")
-            planned_lane = state.get("planned_lane")
+        def room_panel() -> None:
+            view = poll_multiplayer(app.storage.user)
+            status = view.get("status")
+            if status in {"playing", "complete", "opponent_left"}:
+                ui.label("友人が参加しました。対戦盤を開きます…").classes("green-text font-bold")
+                go("/pvp")
+                return
+            if status == "waiting":
+                ui.label("オンライン対戦の待機画面へ戻ります…").classes("blue-text font-bold")
+                go("/online")
+                return
+            if status == "waiting_friend":
+                with ui.card().classes("panel panel--strong"):
+                    ui.label("この合言葉を友人へ送ってください").classes("font-bold")
+                    ui.label(str(view["room_code"])).classes("mono text-4xl font-bold blue-text my-3")
+                    ui.label("参加を待っています（1 / 2）").classes("section-subtitle")
+
+                    def copy_code() -> None:
+                        ui.run_javascript(f"navigator.clipboard.writeText('{view['room_code']}')")
+                        ui.notify("合言葉をコピーしました。", type="positive")
+
+                    with ui.row().classes("gap-2 mt-3"):
+                        secondary_button("合言葉をコピー", icon="content_copy", on_click=copy_code)
+                        secondary_button("部屋を閉じる", icon="close", on_click=cancel_room)
+                return
+            with ui.element("div").classes("content-grid"):
+                with ui.card().classes("panel"):
+                    section_heading("部屋を作る", "あなたが合言葉を友人へ伝えます。")
+                    primary_button("新しい部屋を作る", icon="add", on_click=create_room).classes("mt-3")
+                with ui.card().classes("panel"):
+                    section_heading("部屋へ参加", "上の欄へ合言葉を入力します。")
+                    primary_button("この合言葉で参加", icon="login", on_click=join_room).classes("mt-3")
+                    if room_state["message"]:
+                        ui.label(str(room_state["message"])).classes("danger-text text-sm mt-2")
+
+        room_panel()
+
+        def poll_friend() -> None:
+            view = poll_multiplayer(app.storage.user)
+            if view.get("status") in {"playing", "complete", "opponent_left"}:
+                go("/pvp")
+            else:
+                room_panel.refresh()
+
+        register_client_poll(poll_friend, cleanup=cleanup_room_on_delete)
+
+
+@ui.page("/pvp")
+def multiplayer_battle_page() -> None:
+    user_storage = app.storage.user
+    initial_view = poll_multiplayer(app.storage.user)
+    if initial_view.get("status") == "waiting":
+        go("/online")
+        return
+    if initial_view.get("status") == "waiting_friend":
+        go("/friend")
+        return
+    if initial_view.get("status") == "left":
+        try:
+            close_multiplayer_session(app.storage.user)
+        except MultiplayerError:
+            pass
+        go("/lobby")
+        return
+    if initial_view.get("status") == "idle":
+        with page_shell(
+            "/lobby", "ONLINE OPERATION", "参加中のオンライン対戦がありません",
+            "ロビーからオンライン対戦を選ぶか、フレンドの合言葉で参加してください。",
+        ):
+            primary_button("対戦ロビーへ", "/lobby", "swords")
+        return
+
+    selection_key = "pvp_selection"
+    preferences = get_preferences()
+    last_poll = {"digest": ""}
+
+    def get_pvp_selection(view: dict[str, object]) -> dict[str, object]:
+        match_id = str(view.get("match_id", ""))
+        raw = app.storage.user.get(selection_key)
+        if not isinstance(raw, dict) or raw.get("match_id") != match_id:
+            raw = {"match_id": match_id, "selected": None, "planned_lane": None}
+            app.storage.user[selection_key] = raw
+        return dict(raw)
+
+    def set_pvp_selection(view: dict[str, object], **changes: object) -> None:
+        selected = get_pvp_selection(view)
+        selected.update(changes)
+        app.storage.user[selection_key] = selected
+
+    def select_pvp_card(card_id: str) -> None:
+        view = poll_multiplayer(app.storage.user)
+        if view.get("submitted"):
+            ui.notify("このラウンドの命令は確定済みです。", type="warning")
+            return
+        player_id = str(view["player_id"])
+        hand = view["game"]["players"][player_id]["hand"]
+        if card_id not in hand:
+            ui.notify("そのカードは現在の手札にありません。", type="warning")
+            return
+        set_pvp_selection(view, selected=card_id, planned_lane=None)
+        pvp_board.refresh()
+
+    def plan_pvp_lane(lane_id: str) -> None:
+        view = poll_multiplayer(app.storage.user)
+        selected = get_pvp_selection(view)
+        if not selected.get("selected"):
+            ui.notify("先に手札からカードを選んでください。", type="warning")
+            return
+        set_pvp_selection(view, planned_lane=lane_id)
+        pvp_board.refresh()
+
+    def execute_pvp_order() -> None:
+        view = poll_multiplayer(app.storage.user)
+        selected = get_pvp_selection(view)
+        card_id = selected.get("selected")
+        lane_id = selected.get("planned_lane")
+        if not card_id or not lane_id:
+            ui.notify("カードと配置先を選んでください。", type="warning")
+            return
+        try:
+            response = submit_player_order(app.storage.user, str(card_id), str(lane_id))
+        except (MultiplayerError, RuleViolation) as error:
+            ui.notify(str(error), type="negative")
+            pvp_board.refresh()
+            return
+        set_pvp_selection(response, selected=None, planned_lane=None)
+        if response.get("status") == "complete":
+            claimed = claim_multiplayer_result(app.storage.user)
+            if claimed.get("rewards"):
+                app.storage.user["last_pvp_rewards"] = claimed["rewards"]
+            ui.notify("最終ラウンドを解決しました。", type="positive")
+        elif response.get("submitted"):
+            ui.notify("命令を確定しました。相手の命令を待っています。", type="positive")
+        else:
+            ui.notify("両者の命令を公開し、ラウンドを解決しました。", type="positive")
+        pvp_board.refresh()
+
+    def request_pvp_confirmation() -> None:
+        view = poll_multiplayer(app.storage.user)
+        selected = get_pvp_selection(view)
+        card_id = selected.get("selected")
+        lane_id = selected.get("planned_lane")
+        if not card_id or not lane_id:
+            ui.notify("カードと配置先を選んでください。", type="warning")
+            return
+        if preferences["confirm_orders"]:
+            lane_name = {"left": "左戦線", "center": "中央戦線", "right": "右戦線"}[str(lane_id)]
+            pvp_confirm_text.text = f"{get_card(str(card_id)).name}を{lane_name}へ配備します。"
+            pvp_confirm_dialog.open()
+        else:
+            execute_pvp_order()
+
+    def close_pvp_confirmation() -> None:
+        pvp_confirm_dialog.close()
+        execute_pvp_order()
+
+    def close_pvp_to(path: str) -> None:
+        try:
+            current = poll_multiplayer(app.storage.user)
+            if current.get("status") not in {"complete", "left"}:
+                leave_multiplayer(app.storage.user)
+            close_multiplayer_session(app.storage.user)
+        except MultiplayerError:
+            pass
+        app.storage.user.pop(selection_key, None)
+        go(path)
+
+    def leave_pvp() -> None:
+        close_pvp_to("/lobby")
+
+    with ui.dialog() as pvp_confirm_dialog, ui.card().classes("dialog-card"):
+        ui.label("オンラインへ命令を送りますか？").classes("text-xl font-bold")
+        pvp_confirm_text = ui.label().classes("section-subtitle")
+        ui.label("送信後は、相手が確定するまで変更できません。").classes("muted text-xs")
+        with ui.row().classes("gap-2 mt-3"):
+            primary_button("命令を送信", icon="send", on_click=close_pvp_confirmation)
+            secondary_button("戻る", icon="close", on_click=pvp_confirm_dialog.close)
+
+    mode_label = "ランク対戦" if initial_view.get("mode") == "ranked" else "フレンド対戦" if initial_view.get("mode") == "friend" else "オンライン対戦"
+    with page_shell(
+        "/lobby", "ONLINE OPERATION", mode_label,
+        "あなたと相手が1枚ずつ選び、両方の命令が届いた時点で同時に解決します。",
+    ):
+        @ui.refreshable
+        def pvp_board() -> None:
+            view = poll_multiplayer(app.storage.user)
+            status = str(view.get("status", "idle"))
+            if status == "idle":
+                with ui.card().classes("panel"):
+                    ui.label("対戦情報が見つかりません。").classes("text-xl font-bold")
+                    ui.label("サーバー再起動後は、待機中の対戦が終了する場合があります。").classes("section-subtitle")
+                    primary_button("ロビーへ戻る", "/lobby", "arrow_back").classes("mt-3")
+                return
+
+            game = view["game"]
+            player_id = str(view["player_id"])
+            opponent_id = next(key for key in game["players"] if key != player_id)
+            human = game["players"][player_id]
+            opponent = game["players"][opponent_id]
+            selected = get_pvp_selection(view)
+            selected_id = selected.get("selected")
+            planned_lane = selected.get("planned_lane")
+            submitted = bool(view.get("submitted"))
+            formation = get_formation(str(view.get("formation", "native")))
 
             with ui.element("div").classes("battle-status"):
                 with ui.column().classes("gap-0"):
-                    ui.label("あなた / OSATO").classes("font-bold")
-                    ui.label(f"任務点 {state['mission_points']} / 5").classes("mono blue-text text-xs")
+                    ui.label(f"{human['name']} / あなた").classes("font-bold")
+                    ui.label(f"任務点 {human['mission_points']}").classes("mono blue-text text-xs")
                 with ui.column().classes("items-center gap-0"):
-                    ui.label(f"ROUND {state['round']} / 6").classes("mono text-xl font-bold")
-                    ui.label("命令を選んでください").classes("muted text-xs")
+                    ui.label(f"ROUND {game['round_no']} / {game['max_rounds']}").classes("mono text-xl font-bold")
+                    ui.label("送信済み・相手を待機" if submitted else "命令を選んでください").classes("muted text-xs")
                 with ui.column().classes("items-end gap-0"):
-                    ui.label("AOI-17 / 相手").classes("font-bold")
-                    ui.label("命令を選択中・接続済み").classes("green-text text-xs")
+                    ui.label(f"{view['opponent']['name']} / 相手").classes("font-bold")
+                    connection = "退出" if view["opponent"]["left"] else "接続中" if view["opponent"]["connected"] else "再接続待ち"
+                    ui.label(f"任務点 {opponent['mission_points']}・{connection}").classes("green-text text-xs")
 
-            if not selected_id:
-                focus_title = "① 下の手札からカードを1枚選ぶ"
-                focus_note = "迷ったら『前方偵察班』を選んでください。相手の正体を確認できます。"
-                focus_step = 1
-            elif not planned_lane:
-                focus_title = "② 選んだカードを置く場所を決める"
-                focus_note = "中央戦線の『ここに配置』がおすすめです。"
-                focus_step = 2
-            else:
-                focus_title = "③ 内容を確認して命令を決定する"
-                focus_note = "決定すると相手の命令と同時に公開されます。"
-                focus_step = 3
-
-            with ui.element("div").classes("battle-focus"):
-                with ui.column().classes("gap-1 flex-1"):
-                    ui.label("いま見る場所").classes("page-eyebrow")
-                    ui.label(focus_title).classes("text-xl font-bold")
-                    ui.label(focus_note).classes("section-subtitle")
-                with ui.element("div").classes("action-steps"):
-                    action_step(1, "カード", active=focus_step == 1, done=focus_step > 1)
-                    action_step(2, "場所", active=focus_step == 2, done=focus_step > 2)
-                    action_step(3, "決定", active=focus_step == 3)
-
-            if state.get("complete"):
+            if status == "opponent_left":
                 with ui.element("div").classes("result-banner"):
-                    ui.label("作戦成功").classes("page-eyebrow green-text")
-                    ui.label("左戦線と中央戦線の2か所を確保しました").classes("text-2xl font-bold mt-1")
-                    ui.label("偵察から砲兵へつないだ支援が、中央戦線の確保に貢献しました。").classes("text-sm mt-2")
-                    with ui.row().classes("gap-2 mt-4"):
-                        primary_button("同じ条件でもう一度", icon="replay", on_click=reset_battle)
-                        secondary_button("デッキを調整", "/deck", "view_carousel")
-                        secondary_button("ホームへ", "/", "home")
+                    ui.label("相手が退出しました").classes("text-2xl font-bold")
+                    ui.label("退出した側の不戦敗として結果を確定します。").classes("section-subtitle mt-2")
+                    primary_button("ロビーへ戻る", icon="arrow_back", on_click=leave_pvp).classes("mt-3")
                 return
 
-            with ui.expansion("詳しい解決順を見る", icon="timeline").classes("details-expansion"):
-                with ui.element("div").classes("phase-strip mt-2"):
-                    for index, (name, _) in enumerate(PHASES):
-                        ui.label(f"{index + 1} {name}").classes(
-                            "phase-item" + (" phase-item--active" if index == 0 else "")
+            if status == "complete" and game.get("result"):
+                if not view.get("result_claimed"):
+                    claimed = claim_multiplayer_result(app.storage.user)
+                    if claimed.get("rewards"):
+                        app.storage.user["last_pvp_rewards"] = claimed["rewards"]
+                    view = poll_multiplayer(app.storage.user)
+                result = game["result"]
+                winner = result.get("winner_id")
+                if winner == player_id:
+                    title, badge, badge_class = "オンライン勝利", "勝利", "green-text"
+                elif winner is None:
+                    title, badge, badge_class = "互角の決着", "引き分け", "yellow-text"
+                else:
+                    title, badge, badge_class = "対戦終了", "敗北", "danger-text"
+                with ui.element("div").classes("result-banner"):
+                    ui.label(badge).classes(f"page-eyebrow {badge_class}")
+                    ui.label(title).classes("text-2xl font-bold mt-1")
+                    ui.label(
+                        f"最終任務点：あなた {human['mission_points']} - {opponent['mission_points']} 相手"
+                    ).classes("text-sm mt-2")
+                    ui.label(str(result["summary"])).classes("section-subtitle")
+                    rewards = app.storage.user.get("last_pvp_rewards", {})
+                    if isinstance(rewards, dict) and (rewards.get("cards") or rewards.get("symbols")):
+                        with ui.element("div").classes("beginner-callout mt-3"):
+                            ui.label("コレクション報酬").classes("font-bold")
+                            if rewards.get("cards"):
+                                ui.label("新しいカード：" + "・".join(get_card(cid).name for cid in rewards["cards"])).classes("text-sm")
+                            if rewards.get("symbols"):
+                                ui.label(f"新しい記号：{len(rewards['symbols'])}種類").classes("text-sm")
+                    with ui.row().classes("gap-2 mt-4"):
+                        primary_button("ロビーへ戻る", icon="arrow_back", on_click=leave_pvp)
+                        secondary_button(
+                            "戦績を見る", icon="military_tech",
+                            on_click=lambda: close_pvp_to("/profile"),
                         )
+                return
+
+            if submitted:
+                with ui.element("div").classes("focus-banner"):
+                    ui.spinner("dots", size="30px", color="primary")
+                    with ui.column().classes("gap-0"):
+                        ui.label("命令を送信済みです").classes("font-bold")
+                        ui.label("相手の命令が届くと、自動で結果を表示します。").classes("section-subtitle")
+            elif preferences["beginner_mode"] or preferences["recommended_actions"]:
+                with ui.element("div").classes("battle-focus"):
+                    with ui.column().classes("gap-1"):
+                        ui.label("カード → 場所 → 送信").classes("page-eyebrow beginner-only")
+                        ui.label(
+                            "手札を1枚選んでください" if not selected_id
+                            else "配置先を選んでください" if not planned_lane
+                            else "命令を送信できます"
+                        ).classes("text-xl font-bold")
 
             with ui.element("div").classes("battle-layout"):
                 with ui.column().classes("w-full gap-4 battle-board-column"):
@@ -982,62 +1465,463 @@ def battle_page() -> None:
                             "right": ("右戦線（右翼）", "平地"),
                         }
                         for lane_id, (lane_name, terrain) in lane_labels.items():
-                            lane = state["lanes"][lane_id]
+                            lane = game["lanes"][lane_id]
+                            last_power = lane.get("last_power", {})
+                            own_power = int(last_power.get(player_id, {}).get("total", 0))
+                            enemy_power = int(last_power.get(opponent_id, {}).get("total", 0))
+                            own_units = [d for d in lane["deployments"] if d["player_id"] == player_id]
+                            enemy_units = [d for d in lane["deployments"] if d["player_id"] == opponent_id]
+                            hidden_enemy = any(bool(deployment.get("hidden")) for deployment in enemy_units)
                             planned_class = " battle-lane--planned" if planned_lane == lane_id else ""
                             with ui.element("div").classes(f"battle-lane{planned_class}"):
                                 with ui.row().classes("lane-header items-center justify-between"):
                                     with ui.column().classes("gap-0"):
                                         ui.label(lane_name).classes("font-bold")
                                         ui.label(terrain).classes("muted text-xs")
-                                    difference = lane["friendly"] - lane["enemy"]
-                                    if difference > 0:
+                                    if not lane["round_winners"]:
+                                        chip("未解決", "yellow")
+                                    elif hidden_enemy:
+                                        last_winner = lane["round_winners"][-1]
+                                        if last_winner == player_id:
+                                            chip("前回：あなたが確保", "green")
+                                        elif last_winner == opponent_id:
+                                            chip("前回：相手が確保", "red")
+                                        else:
+                                            chip("前回：互角", "yellow")
+                                    elif own_power > enemy_power:
+                                        chip(f"あなたが優勢 +{own_power - enemy_power}", "green")
+                                    elif own_power < enemy_power:
+                                        chip(f"相手が優勢 +{enemy_power - own_power}", "red")
+                                    else:
+                                        chip("互角", "yellow")
+                                ui.label("相手部隊").classes("muted text-xs mt-3")
+                                if not enemy_units:
+                                    ui.label("まだ配備なし").classes("unknown-unit")
+                                for deployment in enemy_units[-3:]:
+                                    with ui.element("div").classes("unknown-unit"):
+                                        hidden = bool(deployment.get("hidden"))
+                                        ui.icon("help_outline" if hidden else "visibility", size="21px")
+                                        card_data = deployment.get("card") or {}
+                                        ui.label("未確認部隊" if hidden else str(card_data.get("name", "部隊")))
+                                with ui.element("div").classes("control-meter mt-3"):
+                                    ui.label(f"味方 {own_power}").classes("blue-text")
+                                    ui.label("前ラウンド戦線力").classes("muted")
+                                    ui.label(f"敵 {'?' if hidden_enemy else enemy_power}").classes("danger-text text-right")
+                                ui.label("あなたの部隊").classes("muted text-xs mt-3")
+                                with ui.element("div").classes("front-line"):
+                                    ui.label(
+                                        "・".join(str((d.get("card") or {}).get("name", "部隊")) for d in own_units[-3:]) or "まだ配備なし"
+                                    ).classes("font-bold text-sm")
+                                place = ui.button(
+                                    "ここに配置", icon="place", on_click=lambda lid=lane_id: plan_pvp_lane(lid)
+                                ).props("flat no-caps").classes("card-action mt-3")
+                                if not selected_id or submitted:
+                                    place.props("disable")
+
+                    with ui.card().classes("panel battle-hand-panel"):
+                        with ui.row().classes("w-full items-center justify-between"):
+                            with ui.column().classes("gap-0"):
+                                ui.label(f"手札（残り {len(human['hand'])}枚）").classes("section-title")
+                                ui.label("相手には、あなたが確定したカードの内容は見えません。").classes("section-subtitle")
+                            if formation.id != "native":
+                                chip(f"{formation.marker} {formation.name}", "yellow")
+                        with ui.element("div").classes("hand-strip mt-3"):
+                            for card_id in human["hand"]:
+                                card = get_card(card_id)
+                                selected_class = " hand-card--selected" if selected_id == card_id else ""
+                                hand_card = ui.card().classes(f"hand-card{selected_class}")
+                                if not submitted:
+                                    hand_card.on("click", lambda cid=card_id: select_pvp_card(cid))
+                                with hand_card:
+                                    ui.label(card.branch).classes("unit-card__branch")
+                                    ui.label(card.name).classes("font-bold text-sm min-h-10")
+                                    with ui.element("div").classes("unit-card__symbol-area").style("min-height:72px"):
+                                        unit_symbol(card, "sm", formation.id)
+                                    ui.label(card.tagline).classes("text-xs font-bold")
+                        with ui.row().classes("w-full items-center justify-between gap-3"):
+                            if selected_id and planned_lane:
+                                planned_label = {
+                                    "left": "左", "center": "中央", "right": "右"
+                                }[str(planned_lane)]
+                                ui.label(
+                                    f"予定：{get_card(str(selected_id)).name}を"
+                                    f"{planned_label}戦線へ"
+                                ).classes("font-bold")
+                            else:
+                                ui.label("カードと配置先を選んでください").classes("muted text-sm")
+                            send_button = primary_button("命令を送信", icon="send", on_click=request_pvp_confirmation)
+                            if not selected_id or not planned_lane or submitted:
+                                send_button.props("disable")
+
+                with ui.column().classes("battle-side w-full gap-4"):
+                    with ui.card().classes("panel"):
+                        section_heading("対人戦のポイント")
+                        ui.label("先に送っても内容は相手へ見えません。両者が送った時だけ公開・解決します。").classes("section-subtitle mt-2")
+                    with ui.expansion(
+                        "公開済みログ", icon="receipt_long", value=bool(preferences["auto_logs"])
+                    ).classes("details-expansion"):
+                        with ui.column().classes("w-full gap-2 mt-2"):
+                            for event in reversed(game["events"][-10:]):
+                                ui.label(f"R{event['round_no']}：{event['message']}").classes("log-entry")
+                    secondary_button("対戦から退出", icon="logout", on_click=leave_pvp)
+
+        pvp_board()
+
+        def poll_pvp() -> None:
+            view = poll_multiplayer(app.storage.user)
+            game = view.get("game", {}) if isinstance(view, dict) else {}
+            digest = repr((
+                view.get("status") if isinstance(view, dict) else "idle",
+                game.get("round_no") if isinstance(game, dict) else None,
+                view.get("submitted") if isinstance(view, dict) else None,
+                len(game.get("events", [])) if isinstance(game, dict) else 0,
+                (view.get("opponent") or {}).get("connected") if isinstance(view, dict) else None,
+            ))
+            if digest != last_poll["digest"]:
+                last_poll["digest"] = digest
+                pvp_board.refresh()
+
+        register_client_poll(
+            poll_pvp, cleanup=lambda: disconnect_multiplayer(user_storage)
+        )
+
+
+@ui.page("/battle")
+def battle_page() -> None:
+    online_view = poll_multiplayer(app.storage.user)
+    online_status = str(online_view.get("status", "idle"))
+    if online_status in {"playing", "complete", "opponent_left"}:
+        go("/pvp")
+        return
+    if online_status == "waiting":
+        go("/online")
+        return
+    if online_status == "waiting_friend":
+        go("/friend")
+        return
+    if online_status == "left":
+        try:
+            close_multiplayer_session(app.storage.user)
+        except MultiplayerError:
+            pass
+    player = ensure_player_state(app.storage.user)
+    if load_match(app.storage.user) is None and player["selected_mode"] != "training":
+        player = update_state_mode(player, "training")
+        player = store_player_state(app.storage.user, player)
+    preferences = player["preferences"]
+    try:
+        state = start_match(app.storage.user)
+    except RuleViolation:
+        with page_shell(
+            "/lobby", "LIVE OPERATION", "対戦を開始できません",
+            "対戦には所持しているカードを6枚以上入れたデッキが必要です。",
+        ):
+            with ui.card().classes("panel"):
+                ui.icon("warning", size="38px").classes("yellow-text")
+                ui.label("デッキのカードが足りません").classes("text-2xl font-bold")
+                ui.label("デッキ編成で6〜12枚を選ぶと、対戦を始められます。").classes("section-subtitle")
+                primary_button("デッキを編成する", "/deck", "view_carousel").classes("mt-3")
+        return
+
+    context = get_match_context(app.storage.user) or {
+        "mode": player["selected_mode"],
+        "formation": player["selected_formation"],
+    }
+    formation = get_formation(str(context["formation"]))
+    mode_labels = {
+        "training": "初心者演習",
+        "casual": "カジュアル対戦",
+        "ranked": "ランク対戦",
+        "friend": "フレンド対戦",
+    }
+    selection_key = "battle_selection"
+
+    def get_selection() -> dict[str, object]:
+        active = load_match(app.storage.user)
+        game_id = active.game_id if active else ""
+        raw = app.storage.user.get(selection_key)
+        if not isinstance(raw, dict) or raw.get("game_id") != game_id:
+            raw = {"game_id": game_id, "selected": None, "planned_lane": None, "resolving": False}
+            app.storage.user[selection_key] = raw
+        return dict(raw)
+
+    def set_selection(**changes: object) -> dict[str, object]:
+        selected = get_selection()
+        selected.update(changes)
+        app.storage.user[selection_key] = selected
+        return selected
+
+    def select_card(card_id: str) -> None:
+        active = load_match(app.storage.user)
+        if active is None or card_id not in active.players[HUMAN_PLAYER_ID].hand:
+            ui.notify("そのカードは現在の手札にありません。", type="warning")
+            return
+        set_selection(selected=card_id, planned_lane=None)
+        battle_board.refresh()
+
+    def plan_lane(lane_id: str) -> None:
+        selected = get_selection()
+        if not selected.get("selected"):
+            ui.notify("先に手札からカードを選んでください。", type="warning")
+            return
+        set_selection(planned_lane=lane_id)
+        battle_board.refresh()
+
+    def execute_order() -> None:
+        selected = get_selection()
+        card_id = selected.get("selected")
+        lane_id = selected.get("planned_lane")
+        if not card_id or not lane_id:
+            ui.notify("カードと配置先の戦線を選んでください。", type="warning")
+            return
+        set_selection(resolving=True)
+        try:
+            _, resolution = play_player_round(
+                app.storage.user, str(card_id), str(lane_id)
+            )
+        except RuleViolation as error:
+            set_selection(resolving=False)
+            ui.notify(str(error), type="negative")
+            battle_board.refresh()
+            return
+        set_selection(selected=None, planned_lane=None, resolving=False)
+        if preferences["slow_resolution"]:
+            resolved_state = load_match(app.storage.user)
+            round_events = [
+                event.message for event in (resolved_state.events if resolved_state else [])
+                if event.round_no == resolution.round_no
+                and (event.visible_to is None or HUMAN_PLAYER_ID in event.visible_to)
+                and event.kind not in {"order_submitted"}
+            ][-6:]
+            for index, message in enumerate(round_events):
+                ui.notify(
+                    f"{index + 1}. {message}", type="positive", timeout=2200,
+                    position="bottom-right",
+                )
+        else:
+            ui.notify("ラウンドを解決しました。", type="positive")
+        battle_board.refresh()
+
+    def request_confirmation() -> None:
+        selected = get_selection()
+        card_id = selected.get("selected")
+        lane_id = selected.get("planned_lane")
+        if not card_id or not lane_id:
+            ui.notify("カードと配置先の戦線を選んでください。", type="warning")
+            return
+        if preferences["confirm_orders"]:
+            lane_name = {"left": "左戦線", "center": "中央戦線", "right": "右戦線"}[str(lane_id)]
+            confirm_text.text = f"{get_card(str(card_id)).name}を{lane_name}へ配備します。"
+            confirm_dialog.open()
+        else:
+            execute_order()
+
+    def close_and_execute() -> None:
+        confirm_dialog.close()
+        execute_order()
+
+    def reset_battle() -> None:
+        fresh = restart_match(app.storage.user)
+        app.storage.user[selection_key] = {
+            "game_id": fresh.game_id,
+            "selected": None,
+            "planned_lane": None,
+            "resolving": False,
+        }
+        battle_board.refresh()
+        ui.notify("同じ設定で新しい対戦を始めました。", type="positive")
+
+    def leave_battle() -> None:
+        abandon_match(app.storage.user)
+        app.storage.user.pop(selection_key, None)
+        go("/lobby")
+
+    with ui.dialog() as confirm_dialog, ui.card().classes("dialog-card"):
+        ui.label("この命令でよいですか？").classes("text-xl font-bold")
+        confirm_text = ui.label().classes("section-subtitle")
+        ui.label("確定すると相手AIの命令と同時に公開されます。").classes("muted text-xs")
+        with ui.row().classes("gap-2 mt-3"):
+            primary_button("確定して解決", icon="check", on_click=close_and_execute)
+            secondary_button("選び直す", icon="close", on_click=confirm_dialog.close)
+
+    with page_shell(
+        "/lobby", "LIVE OPERATION", f"{mode_labels.get(str(context['mode']), '対戦')}・対戦中",
+        "カードを1枚選び、配置する戦線を選んでから命令を確定します。",
+    ):
+        @ui.refreshable
+        def battle_board() -> None:
+            active = load_match(app.storage.user)
+            if active is None:
+                active = start_match(app.storage.user)
+            selected = get_selection()
+            selected_id = selected.get("selected")
+            planned_lane = selected.get("planned_lane")
+            resolving = bool(selected.get("resolving"))
+            human = active.players[HUMAN_PLAYER_ID]
+            opponent = active.players[AI_PLAYER_ID]
+
+            with ui.element("div").classes("battle-status"):
+                with ui.column().classes("gap-0"):
+                    ui.label(f"{player['profile']['display_name']} / あなた").classes("font-bold")
+                    ui.label(f"任務点 {human.mission_points}").classes("mono blue-text text-xs")
+                with ui.column().classes("items-center gap-0"):
+                    ui.label(f"ROUND {active.round_no} / {active.max_rounds}").classes("mono text-xl font-bold")
+                    ui.label("解決済み" if active.phase is Phase.COMPLETE else "命令を選んでください").classes("muted text-xs")
+                with ui.column().classes("items-end gap-0"):
+                    ui.label(f"{opponent.name} / 相手").classes("font-bold")
+                    ui.label(f"任務点 {opponent.mission_points}・AIが待機中").classes("green-text text-xs")
+
+            if active.phase is Phase.COMPLETE and active.result is not None:
+                completed_context = get_match_context(app.storage.user) or {}
+                rewards = completed_context.get("rewards", {})
+                reward_cards = [
+                    get_card(card_id).name for card_id in rewards.get("cards", [])
+                ] if isinstance(rewards, dict) else []
+                reward_symbols = rewards.get("symbols", []) if isinstance(rewards, dict) else []
+                winner = active.result.winner_id
+                if winner == HUMAN_PLAYER_ID:
+                    result_title, result_badge, badge_class = "作戦成功", "勝利", "green-text"
+                elif winner is None:
+                    result_title, result_badge, badge_class = "互角の結果", "引き分け", "yellow-text"
+                else:
+                    result_title, result_badge, badge_class = "作戦終了", "敗北", "danger-text"
+                with ui.element("div").classes("result-banner"):
+                    ui.label(result_badge).classes(f"page-eyebrow {badge_class}")
+                    ui.label(result_title).classes("text-2xl font-bold mt-1")
+                    ui.label(
+                        f"最終任務点：あなた {human.mission_points} - {opponent.mission_points} 相手"
+                    ).classes("text-sm mt-2")
+                    ui.label(active.result.summary).classes("section-subtitle mt-1")
+                    if reward_cards or reward_symbols:
+                        with ui.element("div").classes("beginner-callout mt-3"):
+                            ui.label("コレクション報酬").classes("font-bold")
+                            if reward_cards:
+                                ui.label(f"新しいカード：{'・'.join(reward_cards)}").classes("text-sm")
+                            if reward_symbols:
+                                ui.label(f"新しい記号：{len(reward_symbols)}種類").classes("text-sm")
+                    with ui.row().classes("gap-2 mt-4"):
+                        primary_button("同じ条件でもう一度", icon="replay", on_click=reset_battle)
+                        secondary_button("戦績を見る", "/profile", "military_tech")
+                        secondary_button("デッキを調整", "/deck", "view_carousel")
+                        secondary_button("ホームへ", "/", "home")
+                return
+
+            if not selected_id:
+                focus_title = "① 下の手札からカードを1枚選ぶ"
+                focus_note = "迷ったら偵察か歩兵を選ぶと、状況を理解しやすくなります。"
+                focus_step = 1
+            elif not planned_lane:
+                focus_title = "② 選んだカードを置く場所を決める"
+                focus_note = "数字が低い戦線を補うか、優勢な戦線を確実に取ります。"
+                focus_step = 2
+            else:
+                focus_title = "③ 内容を確認して命令を決定する"
+                focus_note = "相手も1枚を同時に出し、3戦線の力を比べます。"
+                focus_step = 3
+
+            if preferences["beginner_mode"] or preferences["recommended_actions"]:
+                with ui.element("div").classes("battle-focus"):
+                    with ui.column().classes("gap-1 flex-1"):
+                        ui.label("いま見る場所").classes("page-eyebrow beginner-only")
+                        ui.label(focus_title).classes("text-xl font-bold")
+                        if preferences["recommended_actions"]:
+                            ui.label(focus_note).classes("section-subtitle recommendation-only")
+                    with ui.element("div").classes("action-steps"):
+                        action_step(1, "カード", active=focus_step == 1, done=focus_step > 1)
+                        action_step(2, "場所", active=focus_step == 2, done=focus_step > 2)
+                        action_step(3, "決定", active=focus_step == 3)
+
+            with ui.expansion(
+                "詳しい解決順を見る", icon="timeline", value=bool(preferences["slow_resolution"])
+            ).classes("details-expansion"):
+                with ui.element("div").classes("phase-strip mt-2"):
+                    for index, (name, _) in enumerate(PHASES):
+                        ui.label(f"{index + 1} {name}").classes("phase-item")
+
+            with ui.element("div").classes("battle-layout"):
+                with ui.column().classes("w-full gap-4 battle-board-column"):
+                    with ui.element("div").classes("lane-grid"):
+                        lane_labels = {
+                            "left": ("左戦線（左翼）", "森林"),
+                            "center": ("中央戦線", "市街地"),
+                            "right": ("右戦線（右翼）", "平地"),
+                        }
+                        for lane_id, (lane_name, terrain) in lane_labels.items():
+                            lane = active.lanes[lane_id]
+                            own_power = calculate_lane_power(active, lane_id, HUMAN_PLAYER_ID)
+                            enemy_power = calculate_lane_power(
+                                active, lane_id, AI_PLAYER_ID, visible_to=HUMAN_PLAYER_ID
+                            )
+                            own_deployments = [d for d in lane.deployments if d.player_id == HUMAN_PLAYER_ID]
+                            enemy_deployments = [d for d in lane.deployments if d.player_id == AI_PLAYER_ID]
+                            hidden_enemy_count = sum(
+                                not deployment.visible_to(HUMAN_PLAYER_ID)
+                                for deployment in enemy_deployments
+                            )
+                            planned_class = " battle-lane--planned" if planned_lane == lane_id else ""
+                            with ui.element("div").classes(f"battle-lane{planned_class}"):
+                                with ui.row().classes("lane-header items-center justify-between"):
+                                    with ui.column().classes("gap-0"):
+                                        ui.label(lane_name).classes("font-bold")
+                                        ui.label(terrain).classes("muted text-xs")
+                                    difference = own_power.total - enemy_power.total
+                                    if hidden_enemy_count:
+                                        chip(f"未確認 {hidden_enemy_count}部隊", "yellow")
+                                    elif difference > 0:
                                         chip(f"あなたが優勢 +{difference}", "green")
                                     elif difference < 0:
                                         chip(f"相手が優勢 +{abs(difference)}", "red")
                                     else:
                                         chip("互角", "yellow")
-                                ui.label("相手・前列").classes("muted text-xs mt-3")
-                                if lane["unknown"]:
+                                ui.label("相手部隊").classes("muted text-xs mt-3")
+                                if not enemy_deployments:
+                                    ui.label("まだ配備なし").classes("unknown-unit")
+                                for deployment in enemy_deployments[-3:]:
+                                    visible = deployment.visible_to(HUMAN_PLAYER_ID)
                                     with ui.element("div").classes("unknown-unit"):
-                                        ui.icon("help_outline", size="24px")
-                                        ui.label("未確認部隊 1")
-                                else:
-                                    with ui.element("div").classes("unknown-unit"):
-                                        ui.icon("visibility", size="22px").classes("danger-text")
-                                        ui.label("機械化歩兵隊・発見済み")
+                                        ui.icon("visibility" if visible else "help_outline", size="21px")
+                                        ui.label(get_card(deployment.card_id).name if visible else "未確認部隊")
                                 with ui.element("div").classes("control-meter mt-3"):
-                                    ui.label(f"味方 {lane['friendly']}").classes("blue-text")
-                                    ui.label("制圧").classes("muted")
-                                    ui.label(f"敵 {lane['enemy']}").classes("danger-text text-right")
-                                ui.label("あなた・前列").classes("muted text-xs mt-3")
+                                    ui.label(f"味方 {own_power.total}").classes("blue-text")
+                                    ui.label("戦線力").classes("muted")
+                                    enemy_total = f"{enemy_power.total}+?" if hidden_enemy_count else str(enemy_power.total)
+                                    ui.label(f"敵 {enemy_total}").classes("danger-text text-right")
+                                ui.label("あなたの部隊").classes("muted text-xs mt-3")
                                 with ui.element("div").classes("front-line"):
-                                    ui.label(lane["unit"]).classes("font-bold text-sm")
-                                    ui.label("この場所を確保する部隊").classes("muted text-xs")
+                                    ui.label(
+                                        "・".join(get_card(d.card_id).name for d in own_deployments[-3:]) or "まだ配備なし"
+                                    ).classes("font-bold text-sm")
+                                    ui.label(
+                                        f"制圧 {own_power.control} / 支援 {own_power.active_support} / 補給差 {own_power.supply_generated - own_power.supply_demand:+d}"
+                                    ).classes("muted text-xs")
                                 place_button = ui.button(
                                     "ここに配置", icon="place", on_click=lambda lid=lane_id: plan_lane(lid)
                                 ).props("flat no-caps").classes("card-action mt-3")
-                                if not selected_id:
+                                if not selected_id or resolving:
                                     place_button.props("disable")
 
                     with ui.card().classes("panel battle-hand-panel"):
                         with ui.row().classes("w-full items-center justify-between"):
                             with ui.column().classes("gap-0"):
-                                ui.label("手札").classes("section-title")
-                                ui.label("カードを選択してから、配置先の戦線を選びます。").classes("section-subtitle")
-                            chip("補給 6", "green")
+                                ui.label(f"手札（残り {len(human.hand)}枚）").classes("section-title")
+                                ui.label("1ラウンドに1枚使います。使ったカードはこの対戦中は戻りません。").classes("section-subtitle")
+                            with ui.row().classes("gap-2"):
+                                chip(mode_labels.get(str(context["mode"]), "対戦"), "green")
+                                if formation.id != "native":
+                                    chip(f"{formation.marker} {formation.name}", "yellow")
                         with ui.element("div").classes("hand-strip mt-3"):
-                            for card_id in hand_ids:
+                            for card_id in human.hand:
                                 card = get_card(card_id)
                                 selected_class = " hand-card--selected" if selected_id == card_id else ""
-                                with ui.card().classes(f"hand-card{selected_class}").on(
-                                    "click", lambda cid=card_id: select_card(cid)
-                                ):
+                                hand_card = ui.card().classes(f"hand-card{selected_class}")
+                                if not resolving:
+                                    hand_card.on("click", lambda cid=card_id: select_card(cid))
+                                with hand_card:
                                     with ui.row().classes("w-full items-start justify-between no-wrap"):
                                         ui.label(card.branch).classes("unit-card__branch")
-                                        ui.label(str(card.cost)).classes("unit-card__cost")
                                     ui.label(card.name).classes("font-bold text-sm min-h-10")
                                     with ui.element("div").classes("unit-card__symbol-area").style("min-height:72px"):
-                                        unit_symbol(card, "sm")
+                                        unit_symbol(card, "sm", formation.id)
                                     ui.label(card.tagline).classes("text-xs font-bold")
                         with ui.row().classes("w-full items-center justify-between gap-3"):
                             with ui.column().classes("gap-0 flex-1"):
@@ -1045,31 +1929,35 @@ def battle_page() -> None:
                                     card = get_card(str(selected_id))
                                     lane_name = {"left": "左戦線", "center": "中央戦線", "right": "右戦線"}[str(planned_lane)]
                                     ui.label(f"予定：{card.name}を{lane_name}へ配置").classes("font-bold")
-                                    ui.label("確定すると相手の命令と同時に公開されます。").classes("muted text-xs")
+                                    ui.label("確定後、相手の命令と戦線結果を同時に解決します。").classes("muted text-xs")
                                 else:
                                     ui.label("カードと配置先を選んでください").classes("muted text-sm")
-                            confirm_button = primary_button("命令を確定", icon="check", on_click=confirm_order)
-                            if not selected_id or not planned_lane:
+                            confirm_button = primary_button("命令を確定", icon="check", on_click=request_confirmation)
+                            if not selected_id or not planned_lane or resolving:
                                 confirm_button.props("disable")
-                            secondary_button("やり直す", icon="undo", on_click=lambda: (mutate(selected=None, planned_lane=None), battle_board.refresh()))
+                            secondary_button(
+                                "選択を解除", icon="undo",
+                                on_click=lambda: (set_selection(selected=None, planned_lane=None), battle_board.refresh()),
+                            )
 
                 with ui.column().classes("battle-side w-full gap-4"):
                     with ui.card().classes("panel"):
-                        section_heading("選択中の内容")
-                        if selected_id:
-                            selected_card = get_card(str(selected_id))
-                            with ui.row().classes("items-center gap-3 mt-3"):
-                                unit_symbol(selected_card, "sm")
-                                with ui.column().classes("gap-0"):
-                                    ui.label(selected_card.name).classes("font-bold")
-                                    ui.label(selected_card.tagline).classes("section-subtitle")
-                        else:
-                            ui.label("まだカードを選んでいません。").classes("section-subtitle mt-3")
-                    with ui.expansion("これまでに起きたこと", icon="receipt_long").classes("details-expansion"):
+                        section_heading("この戦線力の見方")
+                        ui.label("制圧が前線の土台、支援は制圧部隊がいると加算、補給不足は減点です。").classes("section-subtitle mt-2")
+                        if formation.id != "native":
+                            ui.label(f"編制表示：{formation.marker} {formation.name}（強さへの追加補正なし）").classes("yellow-text text-xs font-bold mt-2")
+                    with ui.expansion(
+                        "これまでに起きたこと", icon="receipt_long", value=bool(preferences["auto_logs"])
+                    ).classes("details-expansion"):
+                        visible_events = [
+                            event for event in active.events
+                            if event.visible_to is None or HUMAN_PLAYER_ID in event.visible_to
+                        ]
                         with ui.column().classes("w-full gap-2 mt-2"):
-                            for entry in state["log"]:
-                                ui.label(entry).classes("log-entry")
-                    secondary_button("演習をリセット", icon="restart_alt", on_click=reset_battle)
+                            for event in reversed(visible_events[-10:]):
+                                ui.label(f"R{event.round_no}：{event.message}").classes("log-entry")
+                    secondary_button("同じ条件で最初から", icon="restart_alt", on_click=reset_battle)
+                    secondary_button("対戦を終了して戻る", icon="logout", on_click=leave_battle)
 
         battle_board()
 
@@ -1080,30 +1968,79 @@ def profile_page() -> None:
         "/profile", "PLAYER RECORD", "プロフィール / プレイ記録",
         "勝率だけが上達の目安ではありません。索敵や補給など、自分の得意な役割も確認できます。",
     ):
+        player = ensure_player_state(app.storage.user)
+        stats = player["stats"]
+        history = player["battle_history"]
+        battles = int(stats["battles_played"])
+        wins = int(stats["wins"])
+        win_rate = round(wins / battles * 100) if battles else 0
+        rank_label = ("CADET I", "CADET II", "CADET III", "OFFICER I", "OFFICER II")[
+            min(4, wins // 3)
+        ]
+        played_cards = [card_id for entry in history for card_id in entry.get("deck", [])]
+        fallback_card = player["deck"][0] if player["deck"] else STARTER_DECK[0]
+        favorite_id = max(set(played_cards), key=played_cards.count) if played_cards else fallback_card
+
+        def save_profile() -> None:
+            try:
+                updated = update_state_profile(
+                    ensure_player_state(app.storage.user),
+                    display_name=str(name_input.value or ""),
+                    tagline=str(tagline_input.value or ""),
+                )
+            except ValueError as error:
+                ui.notify(str(error), type="negative")
+                return
+            store_player_state(app.storage.user, updated)
+            profile_dialog.close()
+            ui.notify("プロフィールを保存しました。", type="positive")
+            go("/profile")
+
+        with ui.dialog() as profile_dialog, ui.card().classes("dialog-card"):
+            ui.label("プロフィールを編集").classes("text-xl font-bold")
+            name_input = ui.input(
+                "表示名", value=str(player["profile"]["display_name"])
+            ).props("outlined maxlength=20").classes("w-full")
+            tagline_input = ui.input(
+                "ひとこと", value=str(player["profile"]["tagline"])
+            ).props("outlined maxlength=60").classes("w-full")
+            with ui.row().classes("gap-2 mt-3"):
+                primary_button("保存", icon="save", on_click=save_profile)
+                secondary_button("キャンセル", icon="close", on_click=profile_dialog.close)
+
         with ui.element("div").classes("profile-hero"):
-            ui.label("OS").classes("avatar-command")
+            selected_symbol = SYMBOL_INDEX.get(str(player["profile"].get("selected_symbol", "")))
+            avatar_text = selected_symbol.token if selected_symbol else str(player["profile"]["display_name"])[:2].upper()
+            ui.label(avatar_text).classes("avatar-command")
             with ui.column().classes("gap-1"):
                 with ui.row().classes("items-center gap-2"):
-                    ui.label("OSATO").classes("text-2xl font-bold")
-                    chip("CADET II", "green")
-                ui.label("登録 3日目・初心者モード使用中").classes("section-subtitle")
-                ui.label("ひとこと：偵察から覚えています").classes("text-sm")
-            secondary_button("プロフィールを編集", icon="edit", on_click=lambda: ui.notify("編集画面は次の実装段階で接続します。"))
+                    ui.label(str(player["profile"]["display_name"])).classes("text-2xl font-bold")
+                    chip(rank_label, "green")
+                support_label = "初心者モード使用中" if player["preferences"]["beginner_mode"] else "標準表示"
+                ui.label(f"{battles}戦プレイ・{support_label}").classes("section-subtitle")
+                ui.label(f"ひとこと：{player['profile']['tagline'] or '未設定'}").classes("text-sm")
+                if selected_symbol:
+                    ui.label(f"プロフィール章：{selected_symbol.name}").classes("muted text-xs")
+                ui.label("オンライン対戦では表示名だけ相手に共有されます。").classes("muted text-xs")
+            secondary_button("プロフィールを編集", icon="edit", on_click=profile_dialog.open)
 
         with ui.element("div").classes("metric-grid"):
-            metric_card("対戦", "18 戦", "10勝・8敗")
-            metric_card("偵察成功率", "72%", "前週より +8%", "green-text")
-            metric_card("補給切れなし", "11 戦", "機甲を安定運用")
-            metric_card("試したデッキ", "4 種", "次は『守って前進』", "yellow-text")
+            metric_card("対戦", f"{battles} 戦", f"{wins}勝・{stats['losses']}敗・{stats['draws']}分")
+            metric_card("勝率", f"{win_rate}%", "勝敗は演習を含めて記録", "green-text")
+            metric_card("獲得任務点", str(stats["mission_points_earned"]), "3つの戦線で獲得")
+            metric_card("収集", f"{len(player['collection']['owned_cards'])} 枚", f"記号 {len(player['collection']['unlocked_symbols'])} 種", "yellow-text")
 
         with ui.element("div").classes("content-grid"):
             with ui.card().classes("panel"):
-                section_heading("最近の対戦", "結果を押すと詳しい振り返りを確認できます。")
-                for result, color, detail, deck, time in (
-                    ("勝利", "green", "左・中央を確保", "見つけて支援", "今日 20:41"),
-                    ("敗北", "red", "右戦線のみ確保", "はじめての統合部隊", "昨日 22:13"),
-                    ("勝利", "green", "任務点5点を達成", "守って前進", "7月8日 19:32"),
-                ):
+                section_heading("最近の対戦", "勝敗、使用した編制、最終結果を保存しています。")
+                if not history:
+                    ui.label("まだ対戦記録がありません。演習を最後まで遊ぶとここに残ります。").classes("section-subtitle mt-3")
+                result_labels = {"win": ("勝利", "green"), "loss": ("敗北", "red"), "draw": ("引き分け", "yellow")}
+                for entry in history[:5]:
+                    result, color = result_labels.get(entry["result"], ("結果", ""))
+                    detail = entry.get("summary") or f"任務点 {entry['mission_points_for']} - {entry['mission_points_against']}"
+                    deck = f"{len(entry.get('deck', []))}枚 / {get_formation(entry.get('formation')).name}編制"
+                    time = str(entry.get("played_at", ""))[:16].replace("T", " ")
                     with ui.element("div").classes("history-row"):
                         with ui.row().classes("w-full items-center justify-between gap-3"):
                             with ui.row().classes("items-center gap-3"):
@@ -1113,34 +2050,51 @@ def profile_page() -> None:
                                     ui.label(f"使用デッキ：{deck}").classes("muted text-xs")
                             with ui.row().classes("items-center gap-2"):
                                 ui.label(time).classes("muted text-xs")
-                                ui.button(icon="chevron_right", on_click=lambda: go("/battle")).props("round flat aria-label=対戦を振り返る")
             with ui.column().classes("w-full gap-4"):
                 with ui.card().classes("panel"):
                     section_heading("お気に入りカード")
-                    favorite = get_card("recon_1")
+                    favorite = get_card(favorite_id)
+                    favorite_uses = played_cards.count(favorite_id)
                     with ui.row().classes("items-center gap-4 mt-3"):
                         unit_symbol(favorite)
                         with ui.column().classes("gap-0"):
                             ui.label(favorite.name).classes("font-bold")
-                            ui.label("使用 14回・索敵成功 21回").classes("section-subtitle")
-                            chip("熟練度 4 / 10", "yellow")
-                    ui.linear_progress(value=0.4).props("rounded size=8px").classes("progress-track mt-4")
+                            ui.label(f"完了した対戦で使用 {favorite_uses}回").classes("section-subtitle")
+                            chip(f"熟練度 {min(10, favorite_uses)} / 10", "yellow")
+                    ui.linear_progress(value=min(1, favorite_uses / 10)).props("rounded size=8px").classes("progress-track mt-4")
                 with ui.card().classes("panel"):
                     section_heading("獲得した部隊章")
+                    achievements: list[tuple[str, str]] = []
+                    if battles >= 1:
+                        achievements.append(("flag", "初陣"))
+                    if wins >= 1:
+                        achievements.append(("shield", "初勝利"))
+                    if any(entry.get("formation") == "division" for entry in history):
+                        achievements.append(("account_tree", "師団運用"))
+                    if len(player["collection"]["unlocked_symbols"]) == len(SYMBOL_CATALOG):
+                        achievements.append(("verified", "全記号収集"))
+                    if not achievements:
+                        ui.label("対戦を完了すると、ここに部隊章が増えます。").classes("section-subtitle mt-3")
                     with ui.row().classes("gap-3 mt-3"):
-                        for icon, label in (("visibility", "初索敵"), ("shield", "二戦線確保"), ("local_shipping", "補給維持")):
+                        for icon, label in achievements:
                             with ui.column().classes("items-center gap-1"):
                                 with ui.element("div").classes("role-icon").style("--role-color:#60afff"):
                                     ui.icon(icon)
                                 ui.label(label).classes("muted text-xs")
 
 
-def setting_switch(title: str, description: str, value: bool = True) -> None:
+def setting_switch(key: str, title: str, description: str) -> None:
+    preferences = get_preferences()
+
+    def changed(event) -> None:
+        set_preference(key, bool(event.value))
+        ui.notify(f"{title}を{'オン' if event.value else 'オフ'}にしました。", type="positive")
+
     with ui.row().classes("setting-row items-center no-wrap gap-4"):
         with ui.column().classes("gap-0 flex-1"):
             ui.label(title).classes("font-bold text-sm")
             ui.label(description).classes("section-subtitle")
-        ui.switch(value=value, on_change=lambda e: ui.notify(f"{title}を{'オン' if e.value else 'オフ'}にしました。"))
+        ui.switch(value=bool(preferences[key]), on_change=changed)
 
 
 @ui.page("/settings")
@@ -1149,38 +2103,37 @@ def settings_page() -> None:
         "/settings", "PREFERENCES", "設定",
         "説明の量や表示方法を、自分が遊びやすい状態に調整できます。",
     ):
+        preferences = get_preferences()
+
+        def set_choice(key: str, value: str, label: str) -> None:
+            set_preference(key, value)
+            ui.notify(f"{label}を変更しました。", type="positive")
+
+        font_labels = {"standard": "標準", "large": "大きめ", "maximum": "最大"}
+        font_values = {label: key for key, label in font_labels.items()}
         with ui.element("div").classes("content-grid"):
             with ui.column().classes("w-full gap-4"):
                 with ui.card().classes("panel"):
                     section_heading("初心者サポート", "最初はすべてオンがおすすめです。")
-                    setting_switch("初心者モード", "カードの役割とおすすめ行動を常に表示します。")
-                    setting_switch("軍事用語の説明", "専門用語の横に、普段の言葉で意味を表示します。")
-                    setting_switch("おすすめ行動", "選べる行動に迷ったとき、候補を1つ表示します。")
-                    setting_switch("解決順をゆっくり表示", "索敵や砲撃の結果を一つずつ説明します。")
+                    setting_switch("beginner_mode", "初心者モード", "カードの役割とおすすめ行動を常に表示します。")
+                    setting_switch("explain_military_terms", "軍事用語の説明", "専門用語の横に、普段の言葉で意味を表示します。")
+                    setting_switch("recommended_actions", "おすすめ行動", "選べる行動に迷ったとき、候補を1つ表示します。")
+                    setting_switch("slow_resolution", "結果を項目別に表示", "命令公開・索敵・補給・戦線判定を番号付きで表示します。")
                     secondary_button("チュートリアルをもう一度見る", "/learn", "school").classes("mt-3")
                 with ui.card().classes("panel"):
                     section_heading("対戦")
-                    setting_switch("命令確定前に確認する", "誤操作を防ぐため、確定内容を文章で表示します。")
-                    setting_switch("残り10秒で警告する", "時間制限のある対戦で音と文章を表示します。")
-                    setting_switch("戦闘ログを自動表示", "各ラウンドで起きたことを自動で開きます。")
-                    setting_switch("観戦を許可する", "フレンドがあなたの対戦を観戦できます。", False)
+                    setting_switch("confirm_orders", "命令確定前に確認する", "誤操作を防ぐため、確定内容を文章で表示します。")
+                    setting_switch("auto_logs", "戦闘ログを自動表示", "各ラウンドで起きたことを自動で開きます。")
             with ui.column().classes("w-full gap-4"):
                 with ui.card().classes("panel"):
                     section_heading("表示とアクセシビリティ")
                     ui.select(
-                        ["標準", "大きめ", "最大"], value="標準", label="文字サイズ"
+                        list(font_values), value=font_labels[str(preferences["font_size"])], label="文字サイズ",
+                        on_change=lambda e: set_choice("font_size", font_values[str(e.value)], "文字サイズ"),
                     ).props("outlined").classes("filter-control w-full mt-3")
-                    setting_switch("高コントラスト", "境界線と文字の差をさらに大きくします。", False)
-                    setting_switch("アニメーションを減らす", "カード公開などの動きを短くします。", False)
-                    setting_switch("カード記号を大きくする", "カードの中央にある兵科記号を拡大します。", False)
-                    setting_switch("色以外でも陣営を区別", "模様と『味方・敵』の文字も必ず表示します。")
-                with ui.card().classes("panel"):
-                    section_heading("公開範囲")
-                    ui.select(
-                        ["全員に公開", "フレンドのみ", "自分だけ"], value="フレンドのみ", label="プロフィール"
-                    ).props("outlined").classes("filter-control w-full mt-3")
-                    setting_switch("対戦履歴を公開", "フレンドが最近の対戦を確認できます。")
-                    setting_switch("所持カードを公開", "プロフィールにコレクションを表示します。", False)
+                    setting_switch("high_contrast", "高コントラスト", "境界線と文字の差をさらに大きくします。")
+                    setting_switch("reduce_motion", "アニメーションを減らす", "カード公開などの動きを短くします。")
+                    setting_switch("large_symbols", "カード記号を大きくする", "カードの中央にある兵科記号を拡大します。")
 
 
 if __name__ in {"__main__", "__mp_main__"}:

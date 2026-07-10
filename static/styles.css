@@ -1216,6 +1216,230 @@ a:focus-visible {
   border-radius: 10px !important;
 }
 
+/* User preferences -------------------------------------------------------
+   These selectors deliberately live near the end of the stylesheet so a
+   saved accessibility preference wins over the default presentation. */
+
+body.cg-beginner-off .beginner-only,
+body.cg-terms-off .term-explanation,
+body.cg-recommendations-off .recommendation-only {
+  display: none !important;
+}
+
+html.cg-font-standard,
+body.cg-font-standard {
+  --cg-preference-font-size: 16px;
+}
+
+html.cg-font-large,
+body.cg-font-large {
+  --cg-preference-font-size: 18px;
+}
+
+html.cg-font-maximum,
+body.cg-font-maximum {
+  --cg-preference-font-size: 20px;
+}
+
+html.cg-font-standard body.cg-body,
+html.cg-font-large body.cg-body,
+html.cg-font-maximum body.cg-body,
+body.cg-font-standard,
+body.cg-font-large,
+body.cg-font-maximum {
+  font-size: var(--cg-preference-font-size);
+}
+
+:is(html.cg-font-large, body.cg-font-large) :is(
+    .page-subtitle,
+    .hero-description,
+    .start-here__description,
+    .section-subtitle,
+    .q-field__native,
+    .q-field__input,
+    .q-item__label
+  ) {
+  font-size: 17px !important;
+}
+
+:is(html.cg-font-maximum, body.cg-font-maximum) :is(
+    .page-subtitle,
+    .hero-description,
+    .start-here__description,
+    .section-subtitle,
+    .q-field__native,
+    .q-field__input,
+    .q-item__label
+  ) {
+  font-size: 19px !important;
+}
+
+:is(html.cg-font-large, body.cg-font-large) :is(
+    .brand-subtitle,
+    .nav-caption,
+    .metric-label,
+    .metric-note,
+    .unit-card__branch,
+    .card-stat__label,
+    .phase-item,
+    .log-entry,
+    .drawer-brief,
+    .disclaimer,
+    .text-caption,
+    .q-item__label--caption
+  ) {
+  font-size: 14px !important;
+}
+
+:is(html.cg-font-maximum, body.cg-font-maximum) :is(
+    .brand-subtitle,
+    .nav-caption,
+    .metric-label,
+    .metric-note,
+    .unit-card__branch,
+    .card-stat__label,
+    .phase-item,
+    .log-entry,
+    .drawer-brief,
+    .disclaimer,
+    .text-caption,
+    .q-item__label--caption
+  ) {
+  font-size: 16px !important;
+}
+
+:is(html.cg-font-large, body.cg-font-large) .q-btn {
+  min-height: 46px;
+  font-size: 15px;
+}
+
+:is(html.cg-font-maximum, body.cg-font-maximum) .q-btn {
+  min-height: 50px;
+  font-size: 17px;
+}
+
+body.cg-high-contrast {
+  --bg: #000000;
+  --panel: #07131e;
+  --panel-strong: #0b2032;
+  --panel-soft: #081925;
+  --line: #9abbd4;
+  --text: #ffffff;
+  --muted: #e1ebf3;
+  --blue: #78c9ff;
+  --blue-deep: #004f94;
+  --red: #ff8f87;
+  --yellow: #ffe278;
+  --green: #73efb4;
+  --focus: #ffe65c;
+}
+
+body.cg-high-contrast,
+body.cg-high-contrast .q-layout {
+  background-color: #000000 !important;
+  background-image: none;
+}
+
+body.cg-high-contrast :is(.cg-header, .cg-drawer) {
+  background: #020a11 !important;
+  border-color: var(--line) !important;
+}
+
+body.cg-high-contrast :is(
+    .panel,
+    .metric-card,
+    .role-card,
+    .step-card,
+    .beginner-card,
+    .lobby-mode,
+    .glossary-expansion,
+    .details-expansion,
+    .dialog-card
+  ) {
+  border-color: var(--line) !important;
+}
+
+body.cg-high-contrast :is(.muted, .section-subtitle, .page-subtitle, .brand-subtitle) {
+  color: var(--muted) !important;
+}
+
+body.cg-high-contrast :is(button, [tabindex], a):focus-visible {
+  outline-color: var(--focus) !important;
+  outline-width: 4px !important;
+}
+
+body.cg-high-contrast .secondary-button {
+  border-color: #d2e9f9 !important;
+}
+
+body.cg-high-contrast .unit-card,
+body.cg-high-contrast .hand-card {
+  border-color: #477aa5 !important;
+}
+
+body.cg-reduce-motion {
+  scroll-behavior: auto !important;
+}
+
+body.cg-reduce-motion *,
+body.cg-reduce-motion *::before,
+body.cg-reduce-motion *::after {
+  scroll-behavior: auto !important;
+  transition-delay: 0ms !important;
+  transition-duration: 0.01ms !important;
+  animation-delay: 0ms !important;
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+}
+
+body.cg-reduce-motion :is(.unit-card:hover, .hand-card--selected) {
+  transform: none !important;
+}
+
+body.cg-large-symbols .unit-symbol {
+  width: 101px;
+  height: 70px;
+  font-size: 37px;
+}
+
+body.cg-large-symbols .unit-symbol--sm {
+  width: 66px;
+  height: 47px;
+  font-size: 25px;
+}
+
+body.cg-large-symbols .unit-symbol--lg {
+  width: 132px;
+  height: 90px;
+  font-size: 46px;
+}
+
+body.cg-large-symbols .unit-card__symbol-area {
+  min-height: 112px;
+}
+
+body.cg-large-symbols .symbol-family-token {
+  min-width: 100px;
+  height: 72px;
+  font-size: 27px;
+}
+
+body.cg-large-symbols .symbol-mini-token {
+  width: 58px;
+  height: 42px;
+  flex-basis: 58px;
+  font-size: 16px;
+}
+
+body.cg-patterns-off,
+body.cg-patterns-off .q-layout {
+  background-image: none !important;
+}
+
+body.cg-patterns-off .hero-main::after {
+  display: none;
+}
+
 @media (max-width: 1180px) {
   .hero,
   .content-grid,

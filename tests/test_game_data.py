@@ -21,6 +21,40 @@ class GameDataTests(unittest.TestCase):
         represented = {card.branch for card in CARDS}
         self.assertEqual(represented, set(ROLE_INFO))
 
+    def test_every_card_has_rule_copy(self) -> None:
+        for card in CARDS:
+            with self.subTest(card=card.id):
+                self.assertTrue(card.game_text.strip())
+
+    def test_card_copy_does_not_promise_unimplemented_rules(self) -> None:
+        forbidden_phrases = (
+            "中央",
+            "隣",
+            "移動",
+            "歩兵としても",
+            "命令",
+            "公開前",
+            "発見済み",
+            "前列",
+            "1試合",
+            "一度",
+            "回数制限",
+            "守備力",
+            "地形",
+            "前のラウンド",
+            "次ラウンド",
+            "次のラウンド",
+            "回復",
+            "弱った部隊",
+            "二つの戦線",
+            "無効",
+        )
+        for card in CARDS:
+            rule_copy = " ".join((card.tagline, card.game_text, card.good_with))
+            for phrase in forbidden_phrases:
+                with self.subTest(card=card.id, phrase=phrase):
+                    self.assertNotIn(phrase, rule_copy)
+
     def test_starter_deck_is_complete_and_owned(self) -> None:
         self.assertEqual(len(STARTER_DECK), 12)
         self.assertTrue(all(get_card(card_id).owned for card_id in STARTER_DECK))
