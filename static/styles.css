@@ -474,6 +474,229 @@ a:focus-visible {
   line-height: 1.7;
 }
 
+.details-expansion {
+  width: 100%;
+  color: var(--text);
+  background: #0d1d2c !important;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.details-expansion > .q-expansion-item__container > .q-item {
+  min-height: 52px;
+  color: #c3d0dc;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.details-expansion .q-expansion-item__content {
+  padding: 0 14px 14px;
+}
+
+.start-here {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(300px, 0.6fr);
+  gap: 22px;
+  width: 100%;
+  padding: clamp(24px, 4vw, 44px);
+  background: #102b44;
+  border: 2px solid #3975a7;
+  border-radius: 12px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.18);
+}
+
+.start-here--compact {
+  padding: clamp(22px, 3vw, 34px);
+}
+
+.start-here__copy {
+  justify-content: center;
+  align-items: flex-start;
+}
+
+.start-here__title {
+  max-width: 720px;
+  font-size: clamp(28px, 4vw, 44px);
+  font-weight: 850;
+  line-height: 1.2;
+}
+
+.start-here__description {
+  max-width: 680px;
+  color: #ccdae7;
+  font-size: 15px;
+  line-height: 1.8;
+}
+
+.start-here__button {
+  min-width: 230px;
+  min-height: 52px;
+  margin-top: 12px;
+  font-size: 16px;
+}
+
+.start-here__steps,
+.action-steps {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 10px;
+}
+
+.action-step {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-height: 48px;
+  padding: 9px 12px;
+  color: #8498aa;
+  background: #0c1d2b;
+  border: 1px solid #2c4358;
+  border-radius: 7px;
+}
+
+.action-step--active {
+  color: #ffffff;
+  background: #16456e;
+  border-color: var(--blue);
+  box-shadow: inset 3px 0 0 var(--blue);
+}
+
+.action-step--done {
+  color: #bfeeda;
+  background: #113229;
+  border-color: #2a7057;
+}
+
+.action-step__number {
+  display: grid;
+  place-items: center;
+  width: 27px;
+  height: 27px;
+  flex: 0 0 27px;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  font-family: Consolas, "Roboto Mono", monospace;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.action-step__label {
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.simple-rule {
+  max-width: 780px;
+}
+
+.focus-banner,
+.battle-focus {
+  width: 100%;
+  padding: 18px 20px;
+  color: #e5f3ff;
+  background: #102f4a;
+  border: 1px solid #3b77a8;
+  border-left: 5px solid var(--blue);
+  border-radius: 9px;
+}
+
+.beginner-card-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  width: 100%;
+}
+
+.beginner-card {
+  min-height: 192px;
+  padding: 18px;
+  color: var(--text) !important;
+  background: var(--panel) !important;
+  border: 1px solid var(--line) !important;
+  border-radius: 9px !important;
+  box-shadow: none !important;
+}
+
+.collection-next {
+  margin-top: 4px;
+}
+
+.symbol-family-panel {
+  max-width: 1100px;
+}
+
+.symbol-family-token {
+  display: grid;
+  place-items: center;
+  min-width: 86px;
+  height: 62px;
+  color: var(--blue);
+  background: #ffffff;
+  border: 2px solid var(--blue);
+  border-radius: 4px;
+  font-family: Consolas, "Roboto Mono", monospace;
+  font-size: 21px;
+  font-weight: 850;
+}
+
+.symbol-mini-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+  width: 100%;
+}
+
+.symbol-mini-row {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-height: 58px;
+  padding: 9px 11px;
+  background: #10263a;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.symbol-mini-token {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 34px;
+  flex: 0 0 46px;
+  color: #0b5cad;
+  background: #f7faff;
+  border: 1px solid #60afff;
+  border-radius: 2px;
+  font-family: Consolas, "Roboto Mono", monospace;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.battle-focus {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.battle-focus .action-steps {
+  flex-direction: row;
+  flex: 0 0 auto;
+}
+
+.battle-focus .action-step {
+  min-width: 112px;
+}
+
+.battle-board-column .battle-hand-panel {
+  order: 1;
+}
+
+.battle-board-column .lane-grid {
+  order: 2;
+}
+
 .unit-symbol {
   position: relative;
   display: grid;
@@ -1012,6 +1235,20 @@ a:focus-visible {
   .role-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .start-here {
+    grid-template-columns: 1fr;
+  }
+
+  .start-here__steps {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .battle-focus {
+    align-items: stretch;
+    flex-direction: column;
+  }
 }
 
 @media (max-width: 760px) {
@@ -1052,8 +1289,28 @@ a:focus-visible {
   .three-grid,
   .role-grid,
   .filter-bar,
-  .lane-grid {
+  .lane-grid,
+  .beginner-card-grid,
+  .symbol-mini-grid {
     grid-template-columns: 1fr;
+  }
+
+  .start-here {
+    padding: 22px 18px;
+  }
+
+  .start-here__title {
+    font-size: 30px;
+  }
+
+  .start-here__steps,
+  .battle-focus .action-steps {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .battle-focus .action-step {
+    min-width: 0;
   }
 
   .battle-status {
@@ -1094,4 +1351,3 @@ a:focus-visible {
     animation-iteration-count: 1 !important;
   }
 }
-

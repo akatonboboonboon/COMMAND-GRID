@@ -23,6 +23,12 @@ from game_data import (
     analyze_deck,
     get_card,
 )
+from symbol_catalog import (
+    STAGE_LABELS,
+    SYMBOL_CATALOG,
+    SYMBOL_FAMILIES,
+    symbols_for_family,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -31,12 +37,15 @@ app.add_static_files("/static", BASE_DIR / "static")
 
 NAV_ITEMS = (
     ("/", "ホーム", "grid_view"),
-    ("/lobby", "対戦", "swords"),
-    ("/cards", "カード図鑑", "style"),
+    ("/lobby", "遊ぶ", "play_circle"),
+    ("/cards", "コレクション", "style"),
+    ("/learn", "遊び方", "help_outline"),
+)
+
+MORE_NAV_ITEMS = (
     ("/deck", "デッキ編成", "view_carousel"),
     ("/profile", "記録・プロフィール", "military_tech"),
     ("/settings", "設定", "tune"),
-    ("/learn", "遊び方・用語", "help_outline"),
 )
 
 PHASES = (
@@ -189,6 +198,29 @@ def role_card(role: str) -> None:
             ui.label(info["note"]).classes("section-subtitle px-2 pb-2")
 
 
+def beginner_card(card: UnitCard) -> None:
+    """A low-information card used before the player opens full details."""
+    dialog = card_detail_dialog(card)
+    info = ROLE_INFO[card.branch]
+    with ui.card().classes("beginner-card"):
+        with ui.row().classes("w-full items-center gap-4 no-wrap"):
+            unit_symbol(card)
+            with ui.column().classes("gap-1 min-w-0 flex-1"):
+                ui.label(card.branch).classes("page-eyebrow")
+                ui.label(info["verb"]).classes("text-xl font-bold")
+                ui.label(info["plain"]).classes("section-subtitle")
+        ui.button("このカードだけ詳しく見る", icon="arrow_forward", on_click=dialog.open).props(
+            "flat no-caps"
+        ).classes("card-action")
+
+
+def action_step(number: int, label: str, *, active: bool = False, done: bool = False) -> None:
+    state_class = " action-step--active" if active else " action-step--done" if done else ""
+    with ui.element("div").classes(f"action-step{state_class}"):
+        ui.label("✓" if done else str(number)).classes("action-step__number")
+        ui.label(label).classes("action-step__label")
+
+
 @contextmanager
 def page_shell(active: str, eyebrow: str, title: str, subtitle: str) -> Iterator[None]:
     ui.add_head_html('<link rel="stylesheet" href="/static/styles.css">')
@@ -217,11 +249,19 @@ def page_shell(active: str, eyebrow: str, title: str, subtitle: str) -> Iterator
             ui.button(label, icon=icon, on_click=lambda path=route: go(path)).props(
                 "flat no-caps align=left"
             ).classes(f"nav-button{active_class}")
+        more_routes = {route for route, _, _ in MORE_NAV_ITEMS}
+        with ui.expansion(
+            "その他", icon="more_horiz", value=active in more_routes,
+        ).classes("w-full muted text-sm mt-2"):
+            for route, label, icon in MORE_NAV_ITEMS:
+                active_class = " nav-button--active" if route == active else ""
+                ui.button(label, icon=icon, on_click=lambda path=route: go(path)).props(
+                    "flat no-caps align=left"
+                ).classes(f"nav-button{active_class}")
         with ui.element("div").classes("drawer-brief"):
             with ui.row().classes("items-center gap-2"):
-                ui.element("span").classes("online-dot")
                 ui.label("初心者サポート ON").classes("font-bold text-xs")
-            ui.label("用語の横に普段の言葉で説明を表示しています。設定からいつでも変更できます。")
+            ui.label("まず青いボタンだけ見れば進めます。詳しい説明は必要なときに開けます。")
 
     with ui.header().classes("cg-header items-center no-wrap"):
         ui.button(icon="menu", on_click=drawer.toggle).props("flat round aria-label=メニュー")
@@ -232,8 +272,6 @@ def page_shell(active: str, eyebrow: str, title: str, subtitle: str) -> Iterator
                 ui.label("統合戦線・UIプロトタイプ").classes("header-subtitle muted text-xs")
         ui.space()
         with ui.row().classes("items-center gap-2"):
-            ui.element("span").classes("online-dot")
-            ui.label("接続中").classes("header-mode-label muted text-xs")
             chip("初心者モード", "green")
             ui.button("OS", on_click=lambda: go("/profile")).props("round unelevated aria-label=プロフィール").classes(
                 "bg-blue-9 text-white"
@@ -253,6 +291,45 @@ def page_shell(active: str, eyebrow: str, title: str, subtitle: str) -> Iterator
 
 @ui.page("/")
 def home_page() -> None:
+    with page_shell(
+        "/", "START HERE", "まずはここから",
+        "最初は青いボタンを一つ押すだけで大丈夫です。ほかの情報は必要になってから開けます。",
+    ):
+        with ui.element("section").classes("start-here"):
+            with ui.column().classes("start-here__copy gap-2"):
+                chip("最初に見る場所", "green")
+                ui.label("5分演習で、カードを1枚置いてみる").classes("start-here__title")
+                ui.label(
+                    "覚えるのは『カードを選ぶ → 場所を選ぶ → 決定する』の3つだけ。"
+                    "軍事用語や細かい数値は、まだ読まなくて構いません。"
+                ).classes("start-here__description")
+                primary_button("5分演習を始める", "/battle", "play_arrow").classes("start-here__button")
+            with ui.element("div").classes("start-here__steps"):
+                action_step(1, "カードを選ぶ", active=True)
+                action_step(2, "場所を選ぶ")
+                action_step(3, "決定する")
+
+        with ui.card().classes("panel simple-rule"):
+            with ui.row().classes("items-center gap-3 no-wrap"):
+                ui.icon("flag", size="28px").classes("blue-text")
+                with ui.column().classes("gap-0"):
+                    ui.label("ゲームの目的").classes("font-bold")
+                    ui.label("左・中央・右の3か所から、2か所を取れば勝ちです。").classes("section-subtitle")
+
+        with ui.expansion("ほかの情報を見る", icon="unfold_more").classes("details-expansion"):
+            with ui.element("div").classes("metric-grid mt-3"):
+                metric_card("現在のランク", "CADET II", "次のランクまで 120", "blue-text")
+                metric_card("カード図鑑", "12 / 18", "基本6兵科は発見済み")
+                metric_card("今週の対戦", "7 戦", "4勝・3敗", "green-text")
+                metric_card("得意な役割", "偵察", "相手を見つける", "yellow-text")
+            with ui.row().classes("gap-3 mt-4"):
+                secondary_button("通常対戦へ", "/lobby", "swords")
+                secondary_button("カードを見る", "/cards", "style")
+                secondary_button("詳しいホームを見る", "/legacy-home", "dashboard")
+
+
+@ui.page("/legacy-home")
+def legacy_home_page() -> None:
     with page_shell(
         "/", "OPERATIONS DESK", "作戦室へようこそ",
         "軍事知識は必要ありません。『見る・守る・支える』から始めて、3つの戦線を確保しましょう。",
@@ -330,6 +407,42 @@ def home_page() -> None:
 @ui.page("/learn")
 def learn_page() -> None:
     with page_shell(
+        "/learn", "QUICK GUIDE", "遊び方は3つだけ",
+        "この3つを試してから、分からない言葉だけ後で確認すれば大丈夫です。",
+    ):
+        with ui.element("div").classes("focus-banner"):
+            with ui.row().classes("items-center gap-3 no-wrap"):
+                ui.icon("flag", size="28px")
+                with ui.column().classes("gap-0"):
+                    ui.label("目的").classes("page-eyebrow")
+                    ui.label("左・中央・右のうち、2か所を取る").classes("text-xl font-bold")
+
+        with ui.element("div").classes("three-grid"):
+            for number, title, description in (
+                ("1", "カードを選ぶ", "最初は『歩兵』か『偵察』を選べば大丈夫です。"),
+                ("2", "場所を選ぶ", "迷ったら中央へ置きます。"),
+                ("3", "命令を決定", "相手の選択と同時に公開されます。"),
+            ):
+                with ui.card().classes("step-card"):
+                    ui.label(number).classes("step-number")
+                    ui.label(title).classes("font-bold text-lg")
+                    ui.label(description).classes("section-subtitle mt-2")
+
+        primary_button("実際に1枚置いてみる", "/battle", "play_arrow")
+
+        with ui.expansion("6つのカードの仕事を見る", icon="extension").classes("details-expansion"):
+            with ui.element("div").classes("role-grid mt-3"):
+                for role in ROLE_INFO:
+                    role_card(role)
+
+        with ui.expansion("用語や詳しい流れを見る", icon="menu_book").classes("details-expansion"):
+            ui.label("8ステップの演習、解決順、用語集をまとめた詳しい説明があります。").classes("section-subtitle mt-2")
+            secondary_button("詳しい説明を開く", "/advanced-learn", "arrow_forward").classes("mt-3")
+
+
+@ui.page("/advanced-learn")
+def advanced_learn_page() -> None:
+    with page_shell(
         "/learn", "FIELD MANUAL", "5分でわかる遊び方",
         "すべての記号を暗記する必要はありません。カードに書かれた『仕事』を見れば、そのまま遊べます。",
     ):
@@ -374,6 +487,96 @@ def learn_page() -> None:
 
 @ui.page("/cards")
 def cards_page() -> None:
+    with page_shell(
+        "/cards", "COLLECTION", "まず覚える6枚",
+        "最初は、それぞれの『仕事』だけ見れば十分です。数値や専門的な説明は、カードを開いたときだけ表示します。",
+    ):
+        with ui.element("div").classes("focus-banner"):
+            with ui.row().classes("items-start gap-3 no-wrap"):
+                ui.icon("lightbulb", size="26px")
+                with ui.column().classes("gap-1"):
+                    ui.label("この6枚だけで演習を始められます").classes("font-bold text-lg")
+                    ui.label("歩兵が取り、偵察が見つけ、砲兵が助ける。工兵が整え、兵站が支え、機甲が突破します。").classes("text-sm")
+
+        core_cards = [next(card for card in CARDS if card.branch == role and card.owned) for role in ROLE_INFO]
+        with ui.element("div").classes("beginner-card-grid"):
+            for card in core_cards:
+                beginner_card(card)
+
+        with ui.card().classes("panel collection-next"):
+            with ui.row().classes("w-full items-center justify-between gap-4"):
+                with ui.column().classes("gap-1"):
+                    ui.label("もっと見たいときだけ開く").classes("font-bold")
+                    ui.label("全18枚のカード検索と、送っていただいた画像の全記号ライブラリを分けて用意しました。").classes("section-subtitle")
+                with ui.row().classes("gap-2"):
+                    secondary_button("全カードを見る", "/advanced-cards", "style")
+                    secondary_button(f"全記号を見る（{len(SYMBOL_CATALOG)}）", "/symbols", "account_tree")
+
+
+@ui.page("/symbols")
+def symbols_page() -> None:
+    with page_shell(
+        "/cards", "SYMBOL LIBRARY", "全記号ライブラリ",
+        "ここはコレクションを深く見たい人向けです。遊ぶために全部を覚える必要はありません。",
+    ):
+        with ui.element("div").classes("beginner-callout beginner-callout--yellow"):
+            with ui.row().classes("items-center justify-between gap-4 w-full"):
+                with ui.column().classes("gap-1"):
+                    ui.label("初心者の方は読み飛ばして大丈夫です").classes("font-bold")
+                    ui.label("全記号は一度に出さず、短い練習任務と一緒に段階解放します。").classes("text-sm")
+                secondary_button("基本6枚へ戻る", "/cards", "arrow_back")
+
+        family_by_name = {family.name: family for family in SYMBOL_FAMILIES}
+        catalog_state = {"family": "歩兵組織"}
+
+        def change_family(event) -> None:
+            catalog_state["family"] = event.value
+            family_view.refresh()
+
+        ui.select(
+            list(family_by_name), value=catalog_state["family"], label="見る分類を1つ選ぶ",
+            on_change=change_family,
+        ).props("outlined options-dense").classes("filter-control w-full max-w-xl")
+
+        @ui.refreshable
+        def family_view() -> None:
+            family = family_by_name[catalog_state["family"]]
+            symbols = symbols_for_family(family.id)
+            with ui.card().classes("panel symbol-family-panel"):
+                with ui.row().classes("w-full items-start gap-4 no-wrap"):
+                    ui.label(family.token).classes("symbol-family-token")
+                    with ui.column().classes("gap-1 flex-1"):
+                        with ui.row().classes("items-center gap-2"):
+                            ui.label(family.name).classes("section-title")
+                            chip(f"{len(symbols)}種類")
+                        ui.label(family.plain_role).classes("section-subtitle")
+                        with ui.row().classes("gap-2 mt-1"):
+                            chip(family.play_kind.value, "green")
+                            chip(family.domain.value)
+                            chip(STAGE_LABELS[family.unlock_stage], "yellow")
+                ui.separator().classes("bg-blue-grey-8 my-4")
+                ui.label("収録している記号").classes("font-bold")
+                ui.label("各記号には、カード・支援・施設・装備・編制のいずれかの用途を割り当てています。").classes("section-subtitle")
+                with ui.element("div").classes("symbol-mini-grid mt-4"):
+                    for symbol in symbols:
+                        with ui.element("div").classes("symbol-mini-row"):
+                            ui.label(symbol.token).classes("symbol-mini-token")
+                            with ui.column().classes("gap-0 min-w-0"):
+                                ui.label(symbol.name).classes("font-bold text-sm")
+                                ui.label(symbol.play_kind.value).classes("muted text-xs")
+
+        family_view()
+
+        with ui.expansion("全体の解放順を見る", icon="timeline").classes("details-expansion"):
+            for stage, label in STAGE_LABELS.items():
+                count = sum(1 for symbol in SYMBOL_CATALOG if symbol.unlock_stage == stage)
+                with ui.row().classes("w-full items-center justify-between py-2"):
+                    ui.label(label).classes("font-bold text-sm")
+                    chip(f"{count}記号")
+
+
+@ui.page("/advanced-cards")
+def advanced_cards_page() -> None:
     with page_shell(
         "/cards", "COLLECTION / 12 OF 18", "カード図鑑",
         "未入手のカードも能力と入手方法を確認できます。レア度は強さの順位ではありません。",
@@ -539,6 +742,38 @@ def deck_page() -> None:
 @ui.page("/lobby")
 def lobby_page() -> None:
     with page_shell(
+        "/lobby", "PLAY", "何をするか一つ選ぶ",
+        "初めてなら演習がおすすめです。勝敗や時間を気にせず操作を試せます。",
+    ):
+        with ui.element("section").classes("start-here start-here--compact"):
+            with ui.column().classes("start-here__copy gap-2"):
+                chip("おすすめ", "green")
+                ui.label("初心者演習").classes("start-here__title")
+                ui.label("相手は練習用です。時間制限なしで、カードを置くところから始めます。").classes("start-here__description")
+                primary_button("演習を始める", "/battle", "play_arrow").classes("start-here__button")
+            with ui.card().classes("panel panel--compact"):
+                ui.label("使用デッキ").classes("muted text-xs")
+                ui.label("はじめての統合部隊").classes("font-bold")
+                ui.label("6つの基本的な仕事が入っています").classes("section-subtitle")
+                secondary_button("デッキを確認", "/deck", "view_carousel").classes("mt-2")
+
+        with ui.expansion("ほかの遊び方", icon="unfold_more").classes("details-expansion"):
+            with ui.element("div").classes("three-grid mt-3"):
+                for title, description, icon in (
+                    ("カジュアル対戦", "勝敗を気にせず、他のプレイヤーと遊ぶ予定のモードです。", "public"),
+                    ("ランク対戦", "実力が近い相手と競う予定のモードです。", "leaderboard"),
+                    ("フレンド対戦", "招待URLを使って友人と遊ぶ予定のモードです。", "group"),
+                ):
+                    with ui.card().classes("lobby-mode"):
+                        ui.icon(icon, size="28px").classes("blue-text")
+                        ui.label(title).classes("font-bold text-lg mt-2")
+                        ui.label(description).classes("section-subtitle")
+            secondary_button("詳しい対戦準備画面を見る", "/advanced-lobby", "tune").classes("mt-3")
+
+
+@ui.page("/advanced-lobby")
+def advanced_lobby_page() -> None:
+    with page_shell(
         "/lobby", "MATCH CONTROL", "対戦の準備",
         "遊ぶモードとデッキを選びます。最初は時間制限のない演習がおすすめです。",
     ):
@@ -697,6 +932,29 @@ def battle_page() -> None:
                     ui.label("AOI-17 / 相手").classes("font-bold")
                     ui.label("命令を選択中・接続済み").classes("green-text text-xs")
 
+            if not selected_id:
+                focus_title = "① 下の手札からカードを1枚選ぶ"
+                focus_note = "迷ったら『前方偵察班』を選んでください。相手の正体を確認できます。"
+                focus_step = 1
+            elif not planned_lane:
+                focus_title = "② 選んだカードを置く場所を決める"
+                focus_note = "中央戦線の『ここに配置』がおすすめです。"
+                focus_step = 2
+            else:
+                focus_title = "③ 内容を確認して命令を決定する"
+                focus_note = "決定すると相手の命令と同時に公開されます。"
+                focus_step = 3
+
+            with ui.element("div").classes("battle-focus"):
+                with ui.column().classes("gap-1 flex-1"):
+                    ui.label("いま見る場所").classes("page-eyebrow")
+                    ui.label(focus_title).classes("text-xl font-bold")
+                    ui.label(focus_note).classes("section-subtitle")
+                with ui.element("div").classes("action-steps"):
+                    action_step(1, "カード", active=focus_step == 1, done=focus_step > 1)
+                    action_step(2, "場所", active=focus_step == 2, done=focus_step > 2)
+                    action_step(3, "決定", active=focus_step == 3)
+
             if state.get("complete"):
                 with ui.element("div").classes("result-banner"):
                     ui.label("作戦成功").classes("page-eyebrow green-text")
@@ -708,14 +966,15 @@ def battle_page() -> None:
                         secondary_button("ホームへ", "/", "home")
                 return
 
-            with ui.element("div").classes("phase-strip"):
-                for index, (name, _) in enumerate(PHASES):
-                    ui.label(f"{index + 1} {name}").classes(
-                        "phase-item" + (" phase-item--active" if index == 0 else "")
-                    )
+            with ui.expansion("詳しい解決順を見る", icon="timeline").classes("details-expansion"):
+                with ui.element("div").classes("phase-strip mt-2"):
+                    for index, (name, _) in enumerate(PHASES):
+                        ui.label(f"{index + 1} {name}").classes(
+                            "phase-item" + (" phase-item--active" if index == 0 else "")
+                        )
 
             with ui.element("div").classes("battle-layout"):
-                with ui.column().classes("w-full gap-4"):
+                with ui.column().classes("w-full gap-4 battle-board-column"):
                     with ui.element("div").classes("lane-grid"):
                         lane_labels = {
                             "left": ("左戦線（左翼）", "森林"),
@@ -754,11 +1013,13 @@ def battle_page() -> None:
                                 with ui.element("div").classes("front-line"):
                                     ui.label(lane["unit"]).classes("font-bold text-sm")
                                     ui.label("この場所を確保する部隊").classes("muted text-xs")
-                                ui.button(
+                                place_button = ui.button(
                                     "ここに配置", icon="place", on_click=lambda lid=lane_id: plan_lane(lid)
                                 ).props("flat no-caps").classes("card-action mt-3")
+                                if not selected_id:
+                                    place_button.props("disable")
 
-                    with ui.card().classes("panel"):
+                    with ui.card().classes("panel battle-hand-panel"):
                         with ui.row().classes("w-full items-center justify-between"):
                             with ui.column().classes("gap-0"):
                                 ui.label("手札").classes("section-title")
@@ -787,21 +1048,25 @@ def battle_page() -> None:
                                     ui.label("確定すると相手の命令と同時に公開されます。").classes("muted text-xs")
                                 else:
                                     ui.label("カードと配置先を選んでください").classes("muted text-sm")
-                            primary_button("命令を確定", icon="check", on_click=confirm_order)
+                            confirm_button = primary_button("命令を確定", icon="check", on_click=confirm_order)
+                            if not selected_id or not planned_lane:
+                                confirm_button.props("disable")
                             secondary_button("やり直す", icon="undo", on_click=lambda: (mutate(selected=None, planned_lane=None), battle_board.refresh()))
 
                 with ui.column().classes("battle-side w-full gap-4"):
                     with ui.card().classes("panel"):
-                        section_heading("いま何をすればいい？")
-                        with ui.element("div").classes("beginner-callout mt-3"):
-                            ui.label("今回のおすすめ").classes("font-bold")
-                            ui.label("中央に偵察カードを置くと、未確認の相手カードを確認できます。").classes("text-sm mt-1")
-                        ui.label("1. 手札の『前方偵察班』を選ぶ").classes("text-sm mt-3")
-                        ui.label("2. 中央戦線の『ここに配置』を押す").classes("text-sm")
-                        ui.label("3. 『命令を確定』を押す").classes("text-sm")
-                    with ui.card().classes("panel"):
-                        section_heading("戦闘ログ", "専門用語だけにせず、何が起きたか文章で表示します。")
-                        with ui.column().classes("w-full gap-2 mt-3"):
+                        section_heading("選択中の内容")
+                        if selected_id:
+                            selected_card = get_card(str(selected_id))
+                            with ui.row().classes("items-center gap-3 mt-3"):
+                                unit_symbol(selected_card, "sm")
+                                with ui.column().classes("gap-0"):
+                                    ui.label(selected_card.name).classes("font-bold")
+                                    ui.label(selected_card.tagline).classes("section-subtitle")
+                        else:
+                            ui.label("まだカードを選んでいません。").classes("section-subtitle mt-3")
+                    with ui.expansion("これまでに起きたこと", icon="receipt_long").classes("details-expansion"):
+                        with ui.column().classes("w-full gap-2 mt-2"):
                             for entry in state["log"]:
                                 ui.label(entry).classes("log-entry")
                     secondary_button("演習をリセット", icon="restart_alt", on_click=reset_battle)
