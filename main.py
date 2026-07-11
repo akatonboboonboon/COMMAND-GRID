@@ -366,31 +366,41 @@ def advanced_symbol(card: AdvancedCard, *, classes: str = "simulation-card__symb
     )
 
 
+def primary_card_stats(
+    card: UnitCard | AdvancedCard,
+) -> tuple[tuple[str, str], ...]:
+    """Return the four combat values shown on every playable card face."""
+
+    return (
+        ("制圧", str(card.control)),
+        ("支援", str(card.support)),
+        ("偵察", str(card.recon)),
+        ("補給", f"{card.supply:+d}"),
+    )
+
+
 def advanced_stats(card: AdvancedCard) -> None:
     with ui.element("div").classes("simulation-card__stats"):
-        for label, value in (
-            ("制圧", card.control),
-            ("支援", card.support),
-            ("偵察", card.recon),
-            ("補給", f"{card.supply:+d}"),
-            ("指揮", card.command),
-            ("機動", card.mobility),
-        ):
-            with ui.element("div").classes("simulation-card__stat"):
+        for label, value in primary_card_stats(card):
+            with ui.element("div").classes(
+                "simulation-card__stat simulation-card__stat--primary"
+            ):
+                ui.label(label).classes("muted")
+                ui.label(value).classes("mono font-bold")
+        for label, value in (("指揮", card.command), ("機動", card.mobility)):
+            with ui.element("div").classes(
+                "simulation-card__stat simulation-card__stat--extra"
+            ):
                 ui.label(label).classes("muted")
                 ui.label(str(value)).classes("mono font-bold")
 
 
 def card_stats(card: UnitCard) -> None:
     with ui.element("div").classes("card-stats"):
-        for label, value in (
-            ("制圧", card.control),
-            ("支援", card.support),
-            ("索敵", card.recon),
-        ):
+        for label, value in primary_card_stats(card):
             with ui.element("div").classes("card-stat"):
                 ui.label(label).classes("card-stat__label")
-                ui.label(str(value)).classes("card-stat__value")
+                ui.label(value).classes("card-stat__value")
 
 
 def card_detail_dialog(card: UnitCard) -> ui.dialog:
@@ -639,7 +649,7 @@ def card_tutorial_tile(tutorial: CardTutorial, player: dict[str, object]) -> Non
 
 @contextmanager
 def page_shell(active: str, eyebrow: str, title: str, subtitle: str) -> Iterator[None]:
-    ui.add_head_html('<link rel="stylesheet" href="/static/styles.css?v=20260711">')
+    ui.add_head_html('<link rel="stylesheet" href="/static/styles.css?v=20260711-2">')
     ui.colors(
         primary="#60AFFF",
         secondary="#55C7D9",
@@ -1098,7 +1108,7 @@ def basic_tutorial_page() -> None:
                 with option:
                     unit_symbol(card, "sm")
                     ui.label(card.name).classes("font-bold text-sm")
-                    ui.label(f"制圧 {card.control}").classes("muted text-xs")
+                    card_stats(card)
         ui.label("置く戦線を選ぶ").classes("font-bold mt-3")
         with ui.element("div").classes("tutorial-lane-grid"):
             for lane_id, lane_name in (("left", "左戦線"), ("center", "中央戦線"), ("right", "右戦線")):
@@ -1361,6 +1371,13 @@ def card_tutorial_page(card_id: str) -> None:
                             ui.label(
                                 "カードを置くならどこか、3つの戦線を見比べて選びます。"
                             ).classes("muted text-xs")
+                            with ui.element("div").classes("tutorial-exercise-stats"):
+                                with ui.row().classes("items-center gap-3"):
+                                    unit_symbol(card, "sm")
+                                    with ui.column().classes("gap-0"):
+                                        ui.label("今回配備するカード").classes("muted text-xs")
+                                        ui.label(card.name).classes("font-bold")
+                                card_stats(card)
                             with ui.element("div").classes("tutorial-field-grid tutorial-lane-grid"):
                                 for lane in stage.exercise_lanes:
                                     selected = view["answer"] == lane.label
@@ -2498,7 +2515,7 @@ def multiplayer_battle_page() -> None:
                         with ui.row().classes("w-full items-center justify-between"):
                             with ui.column().classes("gap-0"):
                                 ui.label(f"手札（残り {len(human['hand'])}枚）").classes("section-title")
-                                ui.label("相手には、あなたが確定したカードの内容は見えません。").classes("section-subtitle")
+                                ui.label("カード下部の制圧・支援・偵察・補給を見て選べます。相手には確定内容は見えません。").classes("section-subtitle")
                             if formation.id != "native":
                                 chip(f"{formation.marker} {formation.name}", "yellow")
                         with ui.element("div").classes("hand-strip mt-3"):
@@ -2514,6 +2531,7 @@ def multiplayer_battle_page() -> None:
                                     with ui.element("div").classes("unit-card__symbol-area").style("min-height:72px"):
                                         unit_symbol(card, "sm", formation.id)
                                     ui.label(card.tagline).classes("text-xs font-bold")
+                                    card_stats(card)
                         with ui.row().classes("w-full items-center justify-between gap-3"):
                             if selected_id and planned_lane:
                                 planned_label = {
@@ -2885,7 +2903,7 @@ def battle_page() -> None:
                         with ui.row().classes("w-full items-center justify-between"):
                             with ui.column().classes("gap-0"):
                                 ui.label(f"手札（残り {len(human.hand)}枚）").classes("section-title")
-                                ui.label("1ラウンドに1枚使います。使ったカードはこの対戦中は戻りません。").classes("section-subtitle")
+                                ui.label("カード下部の4ステータスを見て、1ラウンドに1枚使います。").classes("section-subtitle")
                             with ui.row().classes("gap-2"):
                                 chip(mode_labels.get(str(context["mode"]), "対戦"), "green")
                                 if formation.id != "native":
@@ -2904,6 +2922,7 @@ def battle_page() -> None:
                                     with ui.element("div").classes("unit-card__symbol-area").style("min-height:72px"):
                                         unit_symbol(card, "sm", formation.id)
                                     ui.label(card.tagline).classes("text-xs font-bold")
+                                    card_stats(card)
                         with ui.row().classes("w-full items-center justify-between gap-3"):
                             with ui.column().classes("gap-0 flex-1"):
                                 if selected_id and planned_lane:
@@ -3189,7 +3208,7 @@ def simulation_page() -> None:
                 with ui.row().classes("w-full items-center justify-between gap-3"):
                     with ui.column().classes("gap-0"):
                         ui.label(f"手札（残り {len(human.hand)}枚）").classes("section-title")
-                        ui.label("この作戦では12枚を使います。カード名より、まず高い数値を1つ見てください。").classes("section-subtitle")
+                        ui.label("上段の制圧・支援・偵察・補給は全カード共通です。指揮・機動は下段に表示します。").classes("section-subtitle")
                     chip(
                         get_advanced_card(str(selection["card"])).name if selection.get("card") else "カード未選択",
                         "green" if selection.get("card") else "",

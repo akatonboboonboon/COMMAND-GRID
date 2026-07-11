@@ -827,7 +827,7 @@ a:focus-visible {
 
 .card-stats {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 6px;
   width: 100%;
   margin-top: 10px;
@@ -1087,7 +1087,7 @@ a:focus-visible {
 .hand-card {
   min-width: 152px;
   max-width: 152px;
-  min-height: 196px;
+  min-height: 278px;
   padding: 12px;
   color: var(--ink) !important;
   background: var(--paper) !important;
@@ -1095,6 +1095,19 @@ a:focus-visible {
   border-radius: 7px !important;
   box-shadow: none !important;
   scroll-snap-align: start;
+}
+
+.hand-card .card-stats {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 8px;
+}
+
+.hand-card .card-stat {
+  padding: 6px 3px;
+}
+
+.hand-card .card-stat__value {
+  font-size: 15px;
 }
 
 .hand-card--selected {
@@ -1882,6 +1895,28 @@ body.cg-patterns-off .hero-main::after {
   border: 2px solid var(--blue) !important;
 }
 
+.tutorial-mini-card .card-stats {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.tutorial-exercise-stats {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px 14px;
+  align-items: center;
+  width: 100%;
+  margin-top: 10px;
+  padding: 12px;
+  background: #0d2233;
+  border: 1px solid #3b5a73;
+  border-radius: 8px;
+}
+
+.tutorial-exercise-stats .card-stats {
+  grid-column: 1 / -1;
+  margin-top: 0;
+}
+
 .tutorial-lane-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -2161,7 +2196,7 @@ body.cg-patterns-off .hero-main::after {
 
 .simulation-card__stats {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 5px;
   width: 100%;
 }
@@ -2174,6 +2209,21 @@ body.cg-patterns-off .hero-main::after {
   border: 1px solid #2e465b;
   border-radius: 5px;
   font-size: 10px;
+}
+
+.simulation-card__stat--primary {
+  background: #102b40;
+  border-color: #3d6889;
+}
+
+.simulation-card__stat--primary .font-bold {
+  color: #eef8ff;
+  font-size: 13px;
+}
+
+.simulation-card__stat--extra {
+  grid-column: span 2;
+  background: #0a1825;
 }
 
 .simulation-controls {
