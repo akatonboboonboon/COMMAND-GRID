@@ -11,6 +11,8 @@ from typing import Callable, Iterator
 from nicegui import app, ui
 
 from account_store import (
+    AccountConfigurationError,
+    AccountDatabaseError,
     AccountStoreError,
     AccountValidationError,
     AuthenticationError,
@@ -173,9 +175,36 @@ def signed_in_username() -> str | None:
 def account_backend_label() -> str:
     try:
         backend = get_default_account_store().backend
-    except AccountStoreError:
-        return "保存先に接続できません"
+    except AccountStoreError as error:
+        return account_store_error_message(error)
     return "PostgreSQL 永続保存" if backend == "postgresql" else "ローカルSQLite保存"
+
+
+def account_store_error_message(error: AccountStoreError) -> str:
+    """Translate account-store failures without exposing connection secrets."""
+
+    if isinstance(error, AccountConfigurationError):
+        reason = str(error).casefold()
+        if "database_url" in reason and "required" in reason:
+            return (
+                "RenderのDATABASE_URLが未設定です。"
+                "Blueprintを同期するか、PostgreSQLのInternal Database URLを設定してください。"
+            )
+        if "database_url" in reason or "database url" in reason:
+            return (
+                "RenderのDATABASE_URLの形式が正しくありません。"
+                "PostgreSQLのInternal Database URLを設定してください。"
+            )
+        return (
+            "アカウント保存先の設定が正しくありません。"
+            "RenderのEnvironment設定を確認してください。"
+        )
+    if isinstance(error, AccountDatabaseError):
+        return (
+            "データベースに接続できません。"
+            "RenderでPostgreSQLが起動中・停止中・期限切れになっていないか確認してください。"
+        )
+    return "アカウント保存中に問題が発生しました。しばらく待ってからもう一度お試しください。"
 
 
 def establish_account_session(username: str) -> dict[str, object]:
@@ -3510,9 +3539,9 @@ def account_page() -> None:
             except AuthenticationError:
                 ui.notify("ユーザー名またはパスワードが違います。", type="negative")
                 return
-            except AccountStoreError:
+            except AccountStoreError as error:
                 ui.notify(
-                    "保存先に接続できません。しばらく待ってからもう一度お試しください。",
+                    account_store_error_message(error),
                     type="negative",
                 )
                 return
@@ -3551,7 +3580,7 @@ def account_page() -> None:
             except (AccountValidationError, ValueError) as error:
                 ui.notify(str(error), type="negative")
                 return
-            except AccountStoreError:
+            except AccountStoreError as error:
                 if registered_username:
                     ui.notify(
                         "アカウントは作成済みです。ログイン欄からログインしてください。",
@@ -3559,7 +3588,7 @@ def account_page() -> None:
                     )
                 else:
                     ui.notify(
-                        "アカウントを保存できませんでした。保存先の設定を確認してから、もう一度お試しください。",
+                        account_store_error_message(error),
                         type="negative",
                     )
                 return

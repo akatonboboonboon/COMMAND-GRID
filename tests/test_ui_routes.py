@@ -1,6 +1,7 @@
 import unittest
 from unittest.mock import patch
 
+from account_store import AccountConfigurationError, AccountDatabaseError
 import main
 
 
@@ -45,6 +46,48 @@ class UiRouteTests(unittest.TestCase):
             side_effect=AssertionError("health check must not wait for the database"),
         ):
             self.assertEqual(main.healthz(), {"status": "ok"})
+
+    def test_account_error_messages_distinguish_database_configuration(self) -> None:
+        missing = main.account_store_error_message(
+            AccountConfigurationError(
+                "DATABASE_URL is required for persistent account storage."
+            )
+        )
+        malformed = main.account_store_error_message(
+            AccountConfigurationError(
+                "DATABASE_URL must be a PostgreSQL URL on Render."
+            )
+        )
+
+        self.assertIn("DATABASE_URL", missing)
+        self.assertIn("未設定", missing)
+        self.assertIn("形式", malformed)
+        self.assertNotEqual(missing, malformed)
+
+    def test_account_error_messages_hide_database_secrets(self) -> None:
+        secret_url = "postgresql://secret-user:secret-password@example.invalid/db"
+
+        configuration_message = main.account_store_error_message(
+            AccountConfigurationError(f"Unsupported account database URL: {secret_url}")
+        )
+        connection_message = main.account_store_error_message(
+            AccountDatabaseError(f"Connection failed for {secret_url}")
+        )
+
+        self.assertNotIn(secret_url, configuration_message)
+        self.assertNotIn("secret-password", configuration_message)
+        self.assertNotIn(secret_url, connection_message)
+        self.assertNotIn("secret-password", connection_message)
+        self.assertIn("接続できません", connection_message)
+
+    def test_account_backend_label_uses_shared_safe_error_message(self) -> None:
+        error = AccountConfigurationError(
+            "DATABASE_URL is required for persistent account storage."
+        )
+        with patch.object(main, "get_default_account_store", side_effect=error):
+            label = main.account_backend_label()
+
+        self.assertEqual(label, main.account_store_error_message(error))
 
     def test_every_card_face_uses_the_same_four_primary_combat_stats(self) -> None:
         expected_labels = ["制圧", "支援", "偵察", "補給"]
