@@ -9,6 +9,8 @@ when new state is written.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import re
 from collections.abc import Iterable, Mapping, MutableMapping, Sequence
 from copy import deepcopy
@@ -24,6 +26,7 @@ from symbol_catalog import CARD_SYMBOL_IDS, SYMBOL_INDEX
 PLAYER_STATE_KEY = "player_state"
 ACCOUNT_USERNAME_STORAGE_KEY = "account_username"
 ACCOUNT_SESSION_STORAGE_KEY = "account_session_token"
+ACCOUNT_SESSION_CACHE_STORAGE_KEY = "account_session_cache"
 ACCOUNT_SYNC_ERROR_STORAGE_KEY = "account_sync_error"
 SCHEMA_VERSION = 3
 MAX_DECK_SIZE = 12
@@ -251,14 +254,90 @@ def ensure_player_state(storage: MutableMapping[str, Any]) -> dict[str, Any]:
 
 
 def store_player_state(
-    storage: MutableMapping[str, Any], state: object
+    storage: MutableMapping[str, Any],
+    state: object,
+    *,
+    sync_account: bool = True,
 ) -> dict[str, Any]:
     """Normalize ``state``, persist it, and return a detached copy."""
 
     normalized = normalize_player_state(state)
     storage[PLAYER_STATE_KEY] = normalized
-    _persist_account_state(storage, normalized)
+    if sync_account:
+        _persist_account_state(storage, normalized)
     return deepcopy(normalized)
+
+
+def mark_account_session_verified(
+    storage: MutableMapping[str, Any],
+    username: str,
+    token: str,
+    *,
+    verified_at: float | None = None,
+) -> None:
+    """Cache a recent server-side session check without retaining another raw token."""
+
+    timestamp = (
+        datetime.now(timezone.utc).timestamp()
+        if verified_at is None
+        else float(verified_at)
+    )
+    storage[ACCOUNT_SESSION_CACHE_STORAGE_KEY] = {
+        "username": username,
+        "token_hash": hashlib.sha256(token.encode("utf-8")).hexdigest(),
+        "verified_at": timestamp,
+    }
+
+
+def cached_account_username(
+    storage: Mapping[str, Any],
+    *,
+    max_age_seconds: float,
+    now: float | None = None,
+) -> str | None:
+    """Return a username only while its exact session token has a fresh check."""
+
+    username = storage.get(ACCOUNT_USERNAME_STORAGE_KEY)
+    token = storage.get(ACCOUNT_SESSION_STORAGE_KEY)
+    cached = storage.get(ACCOUNT_SESSION_CACHE_STORAGE_KEY)
+    if (
+        not isinstance(username, str)
+        or not username
+        or not isinstance(token, str)
+        or not token
+        or not isinstance(cached, Mapping)
+    ):
+        return None
+    cached_username = cached.get("username")
+    token_hash = cached.get("token_hash")
+    verified_at = cached.get("verified_at")
+    if (
+        not isinstance(cached_username, str)
+        or cached_username.casefold() != username.casefold()
+        or not isinstance(token_hash, str)
+        or isinstance(verified_at, bool)
+        or not isinstance(verified_at, (int, float))
+    ):
+        return None
+    try:
+        current_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    except UnicodeEncodeError:
+        return None
+    if not hmac.compare_digest(token_hash, current_hash):
+        return None
+    current_time = (
+        datetime.now(timezone.utc).timestamp() if now is None else float(now)
+    )
+    age = current_time - float(verified_at)
+    if not 0 <= age <= float(max_age_seconds):
+        return None
+    return username
+
+
+def clear_account_session_cache(storage: MutableMapping[str, Any]) -> None:
+    """Forget any cached session verification."""
+
+    storage.pop(ACCOUNT_SESSION_CACHE_STORAGE_KEY, None)
 
 
 def _persist_account_state(
@@ -280,13 +359,16 @@ def _persist_account_state(
         from account_store import AccountStoreError, get_default_account_store
 
         store = get_default_account_store()
-        account = store.resolve_session(session_token)
-        if account is None or account.username.casefold() != username.casefold():
+        saved = store.save_player_state_for_session(
+            username,
+            session_token,
+            state,
+        )
+        if not saved:
             storage[ACCOUNT_SYNC_ERROR_STORAGE_KEY] = (
                 "ログインの有効期限が切れました。もう一度ログインしてください。"
             )
             return
-        store.save_player_state(account.username, state)
     except AccountStoreError as error:
         storage[ACCOUNT_SYNC_ERROR_STORAGE_KEY] = str(error)
     else:

@@ -13,6 +13,13 @@ from unittest.mock import MagicMock, patch
 from account_store import (
     PBKDF2_ITERATIONS,
     POSTGRES_CONNECT_TIMEOUT_SECONDS,
+    POSTGRES_POOL_CLOSE_TIMEOUT_SECONDS,
+    POSTGRES_POOL_MAX_IDLE_SECONDS,
+    POSTGRES_POOL_MAX_LIFETIME_SECONDS,
+    POSTGRES_POOL_MAX_SIZE,
+    POSTGRES_POOL_MAX_WAITING,
+    POSTGRES_POOL_MIN_SIZE,
+    POSTGRES_POOL_TIMEOUT_SECONDS,
     SESSION_LIFETIME,
     AccountConfigurationError,
     AccountDatabaseError,
@@ -281,21 +288,88 @@ class AccountStoreTests(unittest.TestCase):
             explicit_test_store = AccountStore(sqlite_path=":memory:")
             explicit_test_store.close()
 
-    def test_postgresql_connections_have_a_short_timeout(self) -> None:
+    def test_postgresql_connections_use_pool_with_a_short_checkout_timeout(self) -> None:
         postgres_store = object.__new__(AccountStore)
         postgres_store.backend = "postgresql"
-        postgres_store._database_url = "postgresql://example.invalid/command_grid"
-        postgres_store._psycopg = MagicMock()
+        postgres_store._pool = MagicMock()
         connection = MagicMock()
-        postgres_store._psycopg.connect.return_value.__enter__.return_value = connection
+        postgres_store._pool.connection.return_value.__enter__.return_value = connection
 
         with postgres_store._connection() as yielded:
             self.assertIs(yielded, connection)
 
-        postgres_store._psycopg.connect.assert_called_once_with(
-            postgres_store._database_url,
-            connect_timeout=POSTGRES_CONNECT_TIMEOUT_SECONDS,
+        postgres_store._pool.connection.assert_called_once_with(
+            timeout=POSTGRES_POOL_TIMEOUT_SECONDS,
         )
+
+    def test_postgresql_pool_is_small_and_uses_connection_timeout(self) -> None:
+        psycopg_module = MagicMock()
+        pool = MagicMock()
+        pool_class = MagicMock(return_value=pool)
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "psycopg": psycopg_module,
+                "psycopg_pool": MagicMock(ConnectionPool=pool_class),
+            },
+        ), patch.object(AccountStore, "_initialize_schema"):
+            store = AccountStore(
+                database_url="postgresql://example.invalid/command_grid"
+            )
+
+        try:
+            pool_class.assert_called_once_with(
+                conninfo="postgresql://example.invalid/command_grid",
+                min_size=POSTGRES_POOL_MIN_SIZE,
+                max_size=POSTGRES_POOL_MAX_SIZE,
+                open=True,
+                kwargs={"connect_timeout": POSTGRES_CONNECT_TIMEOUT_SECONDS},
+                timeout=POSTGRES_POOL_TIMEOUT_SECONDS,
+                max_waiting=POSTGRES_POOL_MAX_WAITING,
+                max_idle=POSTGRES_POOL_MAX_IDLE_SECONDS,
+                max_lifetime=POSTGRES_POOL_MAX_LIFETIME_SECONDS,
+                name="command-grid-accounts",
+            )
+        finally:
+            store.close()
+
+    def test_postgresql_pool_closes_when_schema_initialization_fails(self) -> None:
+        pool = MagicMock()
+        pool_class = MagicMock(return_value=pool)
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "psycopg": MagicMock(),
+                "psycopg_pool": MagicMock(ConnectionPool=pool_class),
+            },
+        ), patch.object(
+            AccountStore,
+            "_initialize_schema",
+            side_effect=AccountDatabaseError("schema failed"),
+        ):
+            with self.assertRaisesRegex(AccountDatabaseError, "schema failed"):
+                AccountStore(
+                    database_url="postgresql://example.invalid/command_grid"
+                )
+
+        pool.close.assert_called_once_with(
+            timeout=POSTGRES_POOL_CLOSE_TIMEOUT_SECONDS
+        )
+
+    def test_close_releases_postgresql_pool_only_once(self) -> None:
+        store = AccountStore(sqlite_path=":memory:")
+        pool = MagicMock()
+        store._pool = pool
+
+        store.close()
+        store.close()
+
+        pool.close.assert_called_once_with(
+            timeout=POSTGRES_POOL_CLOSE_TIMEOUT_SECONDS
+        )
+        self.assertIsNone(store._pool)
 
     def test_long_username_can_supply_the_default_display_name(self) -> None:
         account = self.store.register("Abcdefghijklmnopqrstuvwx", "secure password")
@@ -349,6 +423,43 @@ class SessionStoreTests(unittest.TestCase):
         self.assertEqual(stored_hash, expected_hash)
         self.assertNotEqual(stored_hash, token.encode("utf-8"))
         self.assertNotIn(token.encode("utf-8"), self.database_path.read_bytes())
+
+    def test_session_guarded_state_save_uses_only_a_live_matching_session(self) -> None:
+        token = self.store.create_session("session_user", now=self.base_time)
+        changed = {"profile": {"display_name": "高速保存"}}
+
+        self.assertTrue(
+            self.store.save_player_state_for_session(
+                "SESSION_USER",
+                token,
+                changed,
+                now=self.base_time + timedelta(minutes=1),
+            )
+        )
+        self.assertEqual(
+            self.store.load_player_state("session_user"),
+            changed,
+        )
+        self.assertFalse(
+            self.store.save_player_state_for_session(
+                "session_user",
+                "invalid-session-token-that-is-long-enough",
+                {"should": "not save"},
+                now=self.base_time + timedelta(minutes=2),
+            )
+        )
+        self.assertFalse(
+            self.store.save_player_state_for_session(
+                "session_user",
+                token,
+                {"should": "not save"},
+                now=self.base_time + SESSION_LIFETIME,
+            )
+        )
+        self.assertEqual(
+            self.store.load_player_state("session_user"),
+            changed,
+        )
 
     def test_delete_session_is_idempotent(self) -> None:
         token = self.store.create_session("session_user", now=self.base_time)

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import time
+from collections.abc import MutableMapping
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -60,10 +62,13 @@ from player_state import (
     ACCOUNT_SESSION_STORAGE_KEY,
     ACCOUNT_SYNC_ERROR_STORAGE_KEY,
     ACCOUNT_USERNAME_STORAGE_KEY,
+    cached_account_username,
+    clear_account_session_cache,
     complete_basic_tutorial,
     complete_card_tutorial,
     default_player_state,
     ensure_player_state,
+    mark_account_session_verified,
     normalize_player_state,
     record_result,
     store_player_state,
@@ -156,19 +161,40 @@ TUTORIAL_STEPS = (
 SIMULATION_MATCH_STORAGE_KEY = "advanced_simulation_match"
 SIMULATION_RECORDED_STORAGE_KEY = "advanced_simulation_recorded"
 SIMULATION_REWARDS_STORAGE_KEY = "advanced_simulation_rewards"
+ACCOUNT_SESSION_CACHE_SECONDS = 300.0
 
 
-def signed_in_username() -> str | None:
-    username = app.storage.user.get(ACCOUNT_USERNAME_STORAGE_KEY)
-    token = app.storage.user.get(ACCOUNT_SESSION_STORAGE_KEY)
+def signed_in_username(
+    storage: MutableMapping[str, object] | None = None,
+    *,
+    now: float | None = None,
+) -> str | None:
+    user_storage = app.storage.user if storage is None else storage
+    cached_username = cached_account_username(
+        user_storage,
+        max_age_seconds=ACCOUNT_SESSION_CACHE_SECONDS,
+        now=now,
+    )
+    if cached_username is not None:
+        return cached_username
+    username = user_storage.get(ACCOUNT_USERNAME_STORAGE_KEY)
+    token = user_storage.get(ACCOUNT_SESSION_STORAGE_KEY)
     if not isinstance(username, str) or not username or not isinstance(token, str):
         return None
     try:
         account = get_default_account_store().resolve_session(token)
     except AccountStoreError:
+        clear_account_session_cache(user_storage)
         return None
     if account is None or account.username.casefold() != username.casefold():
+        clear_account_session_cache(user_storage)
         return None
+    mark_account_session_verified(
+        user_storage,
+        account.username,
+        token,
+        verified_at=time.time() if now is None else now,
+    )
     return account.username
 
 
@@ -216,7 +242,8 @@ def establish_account_session(username: str) -> dict[str, object]:
     token = store.create_session(username)
     app.storage.user[ACCOUNT_USERNAME_STORAGE_KEY] = username
     app.storage.user[ACCOUNT_SESSION_STORAGE_KEY] = token
-    stored = store_player_state(app.storage.user, state)
+    mark_account_session_verified(app.storage.user, username, token)
+    stored = store_player_state(app.storage.user, state, sync_account=False)
     return stored
 
 
@@ -229,6 +256,7 @@ def log_out_account() -> None:
             pass
     app.storage.user.pop(ACCOUNT_USERNAME_STORAGE_KEY, None)
     app.storage.user.pop(ACCOUNT_SESSION_STORAGE_KEY, None)
+    clear_account_session_cache(app.storage.user)
     app.storage.user.pop(ACCOUNT_SYNC_ERROR_STORAGE_KEY, None)
     store_player_state(app.storage.user, default_player_state())
 
@@ -475,9 +503,23 @@ def card_detail_dialog(card: UnitCard) -> ui.dialog:
     return dialog
 
 
+def lazy_card_detail_opener(card: UnitCard) -> Callable[[], None]:
+    """Return a handler which builds this card's dialog on first use only."""
+
+    dialog: ui.dialog | None = None
+
+    def open_detail() -> None:
+        nonlocal dialog
+        if dialog is None:
+            dialog = card_detail_dialog(card)
+        dialog.open()
+
+    return open_detail
+
+
 def unit_card(card: UnitCard, *, selected: bool = False,
               action_label: str = "詳しく見る", action: Callable | None = None) -> None:
-    dialog = card_detail_dialog(card)
+    handler = action if action is not None else lazy_card_detail_opener(card)
     classes = "unit-card"
     if selected:
         classes += " unit-card--selected"
@@ -492,7 +534,6 @@ def unit_card(card: UnitCard, *, selected: bool = False,
             unit_symbol(card)
         ui.label(card.tagline).classes("unit-card__tagline")
         card_stats(card)
-        handler = action or dialog.open
         ui.button(action_label, on_click=handler).props("flat no-caps").classes("card-action")
 
 
@@ -519,7 +560,7 @@ def role_card(role: str) -> None:
 
 def beginner_card(card: UnitCard) -> None:
     """A low-information card used before the player opens full details."""
-    dialog = card_detail_dialog(card)
+    open_detail = lazy_card_detail_opener(card)
     info = ROLE_INFO[card.branch]
     with ui.card().classes("beginner-card"):
         with ui.row().classes("w-full items-center gap-4 no-wrap"):
@@ -528,7 +569,7 @@ def beginner_card(card: UnitCard) -> None:
                 ui.label(card.branch).classes("page-eyebrow")
                 ui.label(info["verb"]).classes("text-xl font-bold")
                 ui.label(info["plain"]).classes("section-subtitle")
-        ui.button("このカードだけ詳しく見る", icon="arrow_forward", on_click=dialog.open).props(
+        ui.button("このカードだけ詳しく見る", icon="arrow_forward", on_click=open_detail).props(
             "flat no-caps"
         ).classes("card-action")
         if card.owned:
@@ -3573,7 +3614,12 @@ def account_page() -> None:
                 token = get_default_account_store().create_session(account.username)
                 app.storage.user[ACCOUNT_USERNAME_STORAGE_KEY] = account.username
                 app.storage.user[ACCOUNT_SESSION_STORAGE_KEY] = token
-                store_player_state(app.storage.user, guest_state)
+                mark_account_session_verified(
+                    app.storage.user, account.username, token
+                )
+                store_player_state(
+                    app.storage.user, guest_state, sync_account=False
+                )
             except DuplicateUsernameError:
                 ui.notify("そのユーザー名はすでに使われています。", type="warning")
                 return

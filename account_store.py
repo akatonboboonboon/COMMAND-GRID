@@ -12,6 +12,7 @@ only a SHA-256 digest of a cryptographically random bearer token.
 
 from __future__ import annotations
 
+import atexit
 import hashlib
 import hmac
 import json
@@ -35,6 +36,13 @@ PASSWORD_HASH_BYTES = 32
 SESSION_TOKEN_BYTES = 48
 SESSION_LIFETIME = timedelta(days=30)
 POSTGRES_CONNECT_TIMEOUT_SECONDS = 5
+POSTGRES_POOL_TIMEOUT_SECONDS = 5
+POSTGRES_POOL_CLOSE_TIMEOUT_SECONDS = 1
+POSTGRES_POOL_MIN_SIZE = 1
+POSTGRES_POOL_MAX_SIZE = 4
+POSTGRES_POOL_MAX_WAITING = 8
+POSTGRES_POOL_MAX_IDLE_SECONDS = 300
+POSTGRES_POOL_MAX_LIFETIME_SECONDS = 1_800
 
 MIN_PASSWORD_LENGTH = 8
 MAX_PASSWORD_LENGTH = 256
@@ -118,6 +126,7 @@ class AccountStore:
         self._lock = threading.RLock()
         self._memory_connection: sqlite3.Connection | None = None
         self._psycopg: Any | None = None
+        self._pool: Any | None = None
 
         source: str | os.PathLike[str] | None = database_url
         uses_environment_config = database_url is None and sqlite_path is None
@@ -156,11 +165,31 @@ class AccountStore:
             self._sqlite_path: str | None = None
             try:
                 import psycopg  # type: ignore[import-not-found]
+                from psycopg_pool import ConnectionPool  # type: ignore[import-not-found]
             except (ImportError, ModuleNotFoundError):
                 raise AccountConfigurationError(
                     "PostgreSQL support is unavailable."
                 ) from None
             self._psycopg = psycopg
+            try:
+                self._pool = ConnectionPool(
+                    conninfo=self._database_url,
+                    min_size=POSTGRES_POOL_MIN_SIZE,
+                    max_size=POSTGRES_POOL_MAX_SIZE,
+                    open=True,
+                    kwargs={
+                        "connect_timeout": POSTGRES_CONNECT_TIMEOUT_SECONDS,
+                    },
+                    timeout=POSTGRES_POOL_TIMEOUT_SECONDS,
+                    max_waiting=POSTGRES_POOL_MAX_WAITING,
+                    max_idle=POSTGRES_POOL_MAX_IDLE_SECONDS,
+                    max_lifetime=POSTGRES_POOL_MAX_LIFETIME_SECONDS,
+                    name="command-grid-accounts",
+                )
+            except Exception:
+                raise AccountDatabaseError(
+                    "The account database could not be initialized."
+                ) from None
         else:
             self.backend = "sqlite"
             self._database_url = None
@@ -168,7 +197,13 @@ class AccountStore:
             if self._sqlite_path != ":memory:":
                 self._sqlite_path = os.fspath(Path(self._sqlite_path).expanduser())
 
-        self._initialize_schema()
+        try:
+            self._initialize_schema()
+        except Exception:
+            # A PostgreSQL pool starts background worker threads immediately.
+            # Do not leave them running when schema preparation fails.
+            self.close()
+            raise
 
     @staticmethod
     def _sqlite_path_from_source(source: str) -> str:
@@ -184,11 +219,11 @@ class AccountStore:
     def _connection(self) -> Iterator[Any]:
         if self.backend == "postgresql":
             try:
-                assert self._psycopg is not None
-                assert self._database_url is not None
-                with self._psycopg.connect(
-                    self._database_url,
-                    connect_timeout=POSTGRES_CONNECT_TIMEOUT_SECONDS,
+                pool = self._pool
+                if pool is None:
+                    raise AccountDatabaseError("The account database is closed.")
+                with pool.connection(
+                    timeout=POSTGRES_POOL_TIMEOUT_SECONDS
                 ) as connection:
                     yield connection
             except AccountStoreError:
@@ -575,6 +610,50 @@ class AccountStore:
         except Exception:
             raise AccountDatabaseError("Player state could not be saved.") from None
 
+    def save_player_state_for_session(
+        self,
+        username: str,
+        token: str,
+        player_state: Mapping[str, Any],
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        """Save state in one statement only when ``token`` is live for ``username``."""
+
+        normalized_username = self._normalize_username(username)
+        token_hash = self._session_digest(token)
+        if token_hash is None:
+            return False
+        encoded_state = self._encode_player_state(player_state)
+        current_time = self._time_text(self._utc_now(now))
+        p = self._p
+        try:
+            with self._connection() as connection:
+                cursor = connection.execute(
+                    f"""
+                        UPDATE accounts
+                        SET player_state = {p}, updated_at = {p}
+                        WHERE username = {p}
+                          AND id = (
+                              SELECT account_id
+                              FROM sessions
+                              WHERE token_hash = {p} AND expires_at > {p}
+                          )
+                    """,
+                    (
+                        encoded_state,
+                        current_time,
+                        normalized_username,
+                        token_hash,
+                        current_time,
+                    ),
+                )
+                saved = cursor.rowcount == 1
+                connection.commit()
+                return saved
+        except Exception:
+            raise AccountDatabaseError("Player state could not be saved.") from None
+
     def update_display_name(self, username: str, display_name: str) -> Account:
         """Change an account's public display name and return fresh metadata."""
 
@@ -738,12 +817,17 @@ class AccountStore:
             raise AccountDatabaseError("Expired sessions could not be purged.") from None
 
     def close(self) -> None:
-        """Release the retained SQLite in-memory connection, if any."""
+        """Release retained SQLite and PostgreSQL connection resources."""
 
+        pool: Any | None = None
         with self._lock:
             if self._memory_connection is not None:
                 self._memory_connection.close()
             self._memory_connection = None
+            pool = self._pool
+            self._pool = None
+        if pool is not None:
+            pool.close(timeout=POSTGRES_POOL_CLOSE_TIMEOUT_SECONDS)
 
     def __enter__(self) -> "AccountStore":
         return self
@@ -761,6 +845,23 @@ def get_default_account_store() -> AccountStore:
             if _default_store is None:
                 _default_store = AccountStore()
     return _default_store
+
+
+def _close_default_account_store() -> None:
+    """Close the process-wide store without surfacing interpreter-exit errors."""
+
+    global _default_store
+    with _default_store_lock:
+        store = _default_store
+        _default_store = None
+    if store is not None:
+        try:
+            store.close()
+        except Exception:
+            pass
+
+
+atexit.register(_close_default_account_store)
 
 
 __all__ = [

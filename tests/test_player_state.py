@@ -9,16 +9,20 @@ from account_store import AccountStore
 from advanced_game_data import ADVANCED_CARDS, ADVANCED_STARTER_DECK
 from game_data import CARDS, STARTER_DECK
 from player_state import (
+    ACCOUNT_SESSION_CACHE_STORAGE_KEY,
     ACCOUNT_SESSION_STORAGE_KEY,
     ACCOUNT_SYNC_ERROR_STORAGE_KEY,
     ACCOUNT_USERNAME_STORAGE_KEY,
     MAX_BATTLE_HISTORY,
     PLAYER_STATE_KEY,
     PREFERENCE_DEFAULTS,
+    cached_account_username,
+    clear_account_session_cache,
     complete_basic_tutorial,
     complete_card_tutorial,
     default_player_state,
     ensure_player_state,
+    mark_account_session_verified,
     normalize_player_state,
     record_result,
     store_player_state,
@@ -36,6 +40,42 @@ from player_state import (
 
 
 class PlayerStateTests(unittest.TestCase):
+    def test_account_session_cache_is_short_lived_and_bound_to_token(self) -> None:
+        storage: dict[str, object] = {
+            ACCOUNT_USERNAME_STORAGE_KEY: "field.fox",
+            ACCOUNT_SESSION_STORAGE_KEY: "session-token-one",
+        }
+        mark_account_session_verified(
+            storage,
+            "field.fox",
+            "session-token-one",
+            verified_at=1_000.0,
+        )
+
+        self.assertEqual(
+            cached_account_username(storage, max_age_seconds=300, now=1_300.0),
+            "field.fox",
+        )
+        self.assertIsNone(
+            cached_account_username(storage, max_age_seconds=300, now=1_301.0)
+        )
+        storage[ACCOUNT_SESSION_STORAGE_KEY] = "different-token"
+        self.assertIsNone(
+            cached_account_username(storage, max_age_seconds=300, now=1_100.0)
+        )
+        clear_account_session_cache(storage)
+        self.assertNotIn(ACCOUNT_SESSION_CACHE_STORAGE_KEY, storage)
+
+    def test_local_only_player_state_store_skips_account_sync(self) -> None:
+        storage: dict[str, object] = {}
+        state = default_player_state()
+
+        with patch("player_state._persist_account_state") as persist:
+            stored = store_player_state(storage, state, sync_account=False)
+
+        persist.assert_not_called()
+        self.assertEqual(ensure_player_state(storage), stored)
+
     def test_default_state_is_detached_and_json_serializable(self) -> None:
         first = default_player_state()
         second = default_player_state()

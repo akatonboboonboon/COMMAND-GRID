@@ -1,11 +1,61 @@
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from account_store import AccountConfigurationError, AccountDatabaseError
 import main
+from player_state import (
+    ACCOUNT_SESSION_STORAGE_KEY,
+    ACCOUNT_USERNAME_STORAGE_KEY,
+    mark_account_session_verified,
+)
 
 
 class UiRouteTests(unittest.TestCase):
+    def test_signed_in_username_uses_fresh_session_cache(self) -> None:
+        storage: dict[str, object] = {
+            ACCOUNT_USERNAME_STORAGE_KEY: "field.fox",
+            ACCOUNT_SESSION_STORAGE_KEY: "cached-session-token",
+        }
+        mark_account_session_verified(
+            storage,
+            "field.fox",
+            "cached-session-token",
+            verified_at=1_000.0,
+        )
+
+        with patch.object(
+            main,
+            "get_default_account_store",
+            side_effect=AssertionError("fresh page navigation must not query the DB"),
+        ):
+            self.assertEqual(
+                main.signed_in_username(storage, now=1_100.0),
+                "field.fox",
+            )
+
+    def test_signed_in_username_refreshes_a_stale_session_cache(self) -> None:
+        storage: dict[str, object] = {
+            ACCOUNT_USERNAME_STORAGE_KEY: "field.fox",
+            ACCOUNT_SESSION_STORAGE_KEY: "stale-session-token",
+        }
+        mark_account_session_verified(
+            storage,
+            "field.fox",
+            "stale-session-token",
+            verified_at=1_000.0,
+        )
+        store = Mock()
+        store.resolve_session.return_value = SimpleNamespace(username="field.fox")
+
+        with patch.object(main, "get_default_account_store", return_value=store):
+            self.assertEqual(
+                main.signed_in_username(storage, now=1_301.0),
+                "field.fox",
+            )
+
+        store.resolve_session.assert_called_once_with("stale-session-token")
+
     def test_required_pages_are_registered(self) -> None:
         paths = {
             getattr(route, "path", "")
@@ -106,6 +156,29 @@ class UiRouteTests(unittest.TestCase):
                         f"{card.supply:+d}",
                     ],
                 )
+
+    def test_card_detail_dialog_is_created_only_on_first_open(self) -> None:
+        card = main.CARDS[0]
+        dialog = Mock()
+
+        with patch.object(main, "card_detail_dialog", return_value=dialog) as create:
+            open_detail = main.lazy_card_detail_opener(card)
+            create.assert_not_called()
+
+            open_detail()
+            open_detail()
+
+        create.assert_called_once_with(card)
+        self.assertEqual(dialog.open.call_count, 2)
+
+    def test_unit_card_with_custom_action_never_prepares_a_dialog(self) -> None:
+        action = Mock()
+        with patch.object(
+            main,
+            "lazy_card_detail_opener",
+            side_effect=AssertionError("custom actions must not prepare a dialog"),
+        ):
+            main.unit_card(main.CARDS[0], action=action)
 
 
 if __name__ == "__main__":
