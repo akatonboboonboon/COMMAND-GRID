@@ -11,7 +11,6 @@ from typing import Callable, Iterator
 from nicegui import app, ui
 
 from account_store import (
-    AccountDatabaseError,
     AccountStoreError,
     AccountValidationError,
     AuthenticationError,
@@ -249,6 +248,9 @@ def set_preference(key: str, value: object) -> None:
 
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
+    # Render must only consider the service healthy after persistent account
+    # storage has been configured and initialized successfully.
+    get_default_account_store()
     return {"status": "ok"}
 
 
@@ -3508,12 +3510,15 @@ def account_page() -> None:
                 establish_account_session(account.username)
             except AuthenticationError:
                 ui.notify("ユーザー名またはパスワードが違います。", type="negative")
-                login_state["busy"] = False
                 return
-            except AccountStoreError as error:
-                ui.notify(str(error), type="negative")
-                login_state["busy"] = False
+            except AccountStoreError:
+                ui.notify(
+                    "保存先に接続できません。しばらく待ってからもう一度お試しください。",
+                    type="negative",
+                )
                 return
+            finally:
+                login_state["busy"] = False
             ui.notify("ログインしました。保存データを復元しました。", type="positive")
             go("/")
 
@@ -3524,6 +3529,7 @@ def account_page() -> None:
                 ui.notify("確認用パスワードが一致しません。", type="warning")
                 return
             login_state["busy"] = True
+            registered_username: str | None = None
             try:
                 guest_state = update_state_profile(
                     ensure_player_state(app.storage.user),
@@ -3535,18 +3541,31 @@ def account_page() -> None:
                     str(register_display_name.value or ""),
                     guest_state,
                 )
+                registered_username = account.username
                 token = get_default_account_store().create_session(account.username)
                 app.storage.user[ACCOUNT_USERNAME_STORAGE_KEY] = account.username
                 app.storage.user[ACCOUNT_SESSION_STORAGE_KEY] = token
                 store_player_state(app.storage.user, guest_state)
             except DuplicateUsernameError:
                 ui.notify("そのユーザー名はすでに使われています。", type="warning")
-                login_state["busy"] = False
                 return
-            except (AccountValidationError, AccountDatabaseError, ValueError) as error:
+            except (AccountValidationError, ValueError) as error:
                 ui.notify(str(error), type="negative")
-                login_state["busy"] = False
                 return
+            except AccountStoreError:
+                if registered_username:
+                    ui.notify(
+                        "アカウントは作成済みです。ログイン欄からログインしてください。",
+                        type="warning",
+                    )
+                else:
+                    ui.notify(
+                        "アカウントを保存できませんでした。保存先の設定を確認してから、もう一度お試しください。",
+                        type="negative",
+                    )
+                return
+            finally:
+                login_state["busy"] = False
             ui.notify("アカウントを作成し、現在の進行状況を保存しました。", type="positive")
             go("/account")
 
@@ -3571,9 +3590,12 @@ def account_page() -> None:
 
             with ui.card().classes("panel account-auth-card"):
                 section_heading("新規登録", "今のゲスト進行状況をそのまま保存します。")
-                register_username = ui.input("ユーザー名（半角3〜24文字）").props(
+                register_username = ui.input("ユーザー名（2〜24文字・日本語OK）").props(
                     "outlined autocomplete=username maxlength=24"
                 ).classes("filter-control w-full mt-3")
+                ui.label(
+                    "日本語・英数字と . _ - が使えます（空白は使えません）。"
+                ).classes("text-xs text-slate-400 -mt-2 mb-1")
                 register_display_name = ui.input(
                     "表示名", value=str(ensure_player_state(app.storage.user)["profile"]["display_name"])
                 ).props("outlined maxlength=20").classes("filter-control w-full")

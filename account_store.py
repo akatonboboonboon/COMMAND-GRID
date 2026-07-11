@@ -16,10 +16,10 @@ import hashlib
 import hmac
 import json
 import os
-import re
 import secrets
 import sqlite3
 import threading
+import unicodedata
 from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -37,13 +37,19 @@ SESSION_LIFETIME = timedelta(days=30)
 
 MIN_PASSWORD_LENGTH = 8
 MAX_PASSWORD_LENGTH = 256
+MIN_USERNAME_LENGTH = 2
+MAX_USERNAME_LENGTH = 24
 MIN_DISPLAY_NAME_LENGTH = 2
 MAX_DISPLAY_NAME_LENGTH = 20
 
-_USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9._-]{3,24}$")
+_USERNAME_PUNCTUATION = frozenset("._-")
 _MAX_STORED_ITERATIONS = 5_000_000
 _default_store: "AccountStore | None" = None
 _default_store_lock = threading.Lock()
+
+
+def _environment_flag(name: str) -> bool:
+    return os.getenv(name, "").strip().casefold() in {"1", "true", "yes", "on"}
 
 
 class AccountStoreError(Exception):
@@ -91,7 +97,7 @@ class AccountStore:
     ``database_url`` may be a PostgreSQL URL, a ``sqlite:///`` URL, or a local
     filesystem path.  If omitted, ``DATABASE_URL`` is consulted and then
     ``ACCOUNT_DB_PATH``.  The final local fallback is
-    ``command_grid_accounts.sqlite3`` in the working directory.
+    ``command_grid_accounts.sqlite3`` beside this module.
 
     ``sqlite_path`` is a convenience for tests and local embedding.  It cannot
     be combined with ``database_url``.
@@ -113,14 +119,34 @@ class AccountStore:
         self._psycopg: Any | None = None
 
         source: str | os.PathLike[str] | None = database_url
+        uses_environment_config = database_url is None and sqlite_path is None
+        database_is_required = False
         if sqlite_path is not None:
             source = sqlite_path
-        elif source is None:
-            source = os.getenv("DATABASE_URL") or os.getenv("ACCOUNT_DB_PATH")
+        elif uses_environment_config:
+            database_url_from_environment = os.getenv("DATABASE_URL")
+            database_is_required = _environment_flag(
+                "ACCOUNT_REQUIRE_DATABASE"
+            ) or _environment_flag("RENDER")
+            if database_is_required and not database_url_from_environment:
+                raise AccountConfigurationError(
+                    "DATABASE_URL is required for persistent account storage."
+                )
+            source = database_url_from_environment or os.getenv("ACCOUNT_DB_PATH")
         if source is None:
-            source = "command_grid_accounts.sqlite3"
+            source = Path(__file__).resolve().with_name(
+                "command_grid_accounts.sqlite3"
+            )
 
         source_text = os.fspath(source)
+        if (
+            uses_environment_config
+            and database_is_required
+            and not source_text.startswith(("postgresql://", "postgres://"))
+        ):
+            raise AccountConfigurationError(
+                "DATABASE_URL must be a PostgreSQL URL on Render."
+            )
         if source_text.startswith(("postgresql://", "postgres://")):
             self.backend = "postgresql"
             if source_text.startswith("postgres://"):
@@ -259,36 +285,47 @@ class AccountStore:
     @staticmethod
     def _normalize_username(username: str) -> str:
         if not isinstance(username, str):
-            raise AccountValidationError("Username must be text.")
-        cleaned = username.strip()
-        if not _USERNAME_PATTERN.fullmatch(cleaned):
+            raise AccountValidationError("ユーザー名を文字で入力してください。")
+        cleaned = unicodedata.normalize("NFKC", username.strip())
+        canonical = unicodedata.normalize("NFKC", cleaned.casefold())
+        if (
+            not MIN_USERNAME_LENGTH <= len(cleaned) <= MAX_USERNAME_LENGTH
+            or len(canonical) > MAX_USERNAME_LENGTH
+        ):
             raise AccountValidationError(
-                "Username must be 3-24 characters using letters, numbers, ., _, or -."
+                "ユーザー名は2〜24文字で入力してください。日本語も使用できます。"
             )
-        return cleaned.lower()
+        if not all(
+            character.isalnum() or character in _USERNAME_PUNCTUATION
+            for character in canonical
+        ) or not any(character.isalnum() for character in canonical):
+            raise AccountValidationError(
+                "ユーザー名には日本語・英数字と . _ - だけを使用できます。"
+            )
+        return canonical
 
     @staticmethod
     def _normalize_display_name(display_name: str) -> str:
         if not isinstance(display_name, str):
-            raise AccountValidationError("Display name must be text.")
+            raise AccountValidationError("表示名を文字で入力してください。")
         cleaned = " ".join(display_name.split())
         if not MIN_DISPLAY_NAME_LENGTH <= len(cleaned) <= MAX_DISPLAY_NAME_LENGTH:
-            raise AccountValidationError("Display name must be 2-20 characters.")
+            raise AccountValidationError("表示名は2〜20文字で入力してください。")
         if not cleaned.isprintable() or "\x00" in cleaned:
-            raise AccountValidationError("Display name contains unsupported characters.")
+            raise AccountValidationError("表示名に使用できない文字が含まれています。")
         return cleaned
 
     @staticmethod
     def _validate_password(password: str) -> str:
         if not isinstance(password, str):
-            raise AccountValidationError("Password must be text.")
+            raise AccountValidationError("パスワードを文字で入力してください。")
         if not MIN_PASSWORD_LENGTH <= len(password) <= MAX_PASSWORD_LENGTH:
-            raise AccountValidationError("Password must be 8-256 characters.")
+            raise AccountValidationError("パスワードは8〜256文字で入力してください。")
         try:
             password.encode("utf-8")
         except UnicodeEncodeError:
             raise AccountValidationError(
-                "Password contains unsupported characters."
+                "パスワードに使用できない文字が含まれています。"
             ) from None
         return password
 
@@ -375,7 +412,9 @@ class AccountStore:
 
         normalized_username = self._normalize_username(username)
         cleaned_display_name = self._normalize_display_name(
-            username.strip()[:MAX_DISPLAY_NAME_LENGTH]
+            unicodedata.normalize("NFKC", username.strip())[
+                :MAX_DISPLAY_NAME_LENGTH
+            ]
             if display_name is None
             else display_name
         )

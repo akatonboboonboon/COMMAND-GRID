@@ -8,6 +8,7 @@ import unittest
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from account_store import (
     PBKDF2_ITERATIONS,
@@ -66,8 +67,59 @@ class AccountStoreTests(unittest.TestCase):
         with self.assertRaises(DuplicateUsernameError):
             self.store.register("SCOUT-ONE", "another good password", "Other Name")
 
+    def test_japanese_username_can_register_authenticate_and_restore_state(self) -> None:
+        expected_state = {
+            "deck": ["infantry", "recon"],
+            "profile": {"display_name": "赤豚司令官"},
+        }
+        account = self.store.register(
+            "  赤豚司令官01  ",
+            "日本語も使える安全なパスワード",
+            "赤豚司令官",
+            expected_state,
+        )
+
+        self.assertEqual(account.username, "赤豚司令官01")
+        changed_state = {
+            **expected_state,
+            "profile": {"display_name": "保存確認済み"},
+        }
+        self.store.save_player_state(account.username, changed_state)
+        self.store.close()
+        self.store = AccountStore(sqlite_path=self.database_path)
+        authenticated = self.store.authenticate(
+            "赤豚司令官01", "日本語も使える安全なパスワード"
+        )
+        self.assertEqual(authenticated.username, account.username)
+        self.assertEqual(self.store.load_player_state(account.username), changed_state)
+
+    def test_two_character_japanese_username_is_allowed(self) -> None:
+        account = self.store.register("赤豚", "long enough password", "赤豚")
+
+        self.assertEqual(account.username, "赤豚")
+
+    def test_username_nfkc_normalization_prevents_compatibility_duplicates(self) -> None:
+        self.store.register("Ａｌｉｃｅ", "long enough password", "Alice")
+
+        with self.assertRaises(DuplicateUsernameError):
+            self.store.register("alice", "another good password", "Other Name")
+
+        self.store.register("Straße", "long enough password", "Straße")
+        with self.assertRaises(DuplicateUsernameError):
+            self.store.register("STRASSE", "another good password", "Other Name")
+
     def test_username_validation_rejects_wrong_length_or_characters(self) -> None:
-        invalid_names = ("ab", "x" * 25, "two words", "名前", "a/b", "a@b")
+        invalid_names = (
+            "a",
+            "ß",
+            "x" * 25,
+            "two words",
+            "名前/",
+            "a/b",
+            "a@b",
+            "司令官😀",
+            "---",
+        )
         for username in invalid_names:
             with self.subTest(username=username):
                 with self.assertRaises(AccountValidationError):
@@ -216,11 +268,23 @@ class AccountStoreTests(unittest.TestCase):
         with self.assertRaises(AccountConfigurationError):
             AccountStore(database_url="one.db", sqlite_path="two.db")
 
+    def test_render_refuses_ephemeral_sqlite_fallback(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {"RENDER": "true"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(AccountConfigurationError, "DATABASE_URL"):
+                AccountStore()
+
+            explicit_test_store = AccountStore(sqlite_path=":memory:")
+            explicit_test_store.close()
+
     def test_long_username_can_supply_the_default_display_name(self) -> None:
-        account = self.store.register("abcdefghijklmnopqrstuvwx", "secure password")
+        account = self.store.register("Abcdefghijklmnopqrstuvwx", "secure password")
 
         self.assertEqual(account.username, "abcdefghijklmnopqrstuvwx")
-        self.assertEqual(account.display_name, "abcdefghijklmnopqrst")
+        self.assertEqual(account.display_name, "Abcdefghijklmnopqrst")
 
 
 class SessionStoreTests(unittest.TestCase):

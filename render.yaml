@@ -14,6 +14,8 @@ services:
         generateValue: true
       - key: NICEGUI_RELOAD
         value: "false"
+      - key: ACCOUNT_REQUIRE_DATABASE
+        value: "true"
       - key: DATABASE_URL
         fromDatabase:
           name: command-grid-db
