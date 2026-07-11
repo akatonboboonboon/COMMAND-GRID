@@ -7,6 +7,8 @@ from player_state import (
     MAX_BATTLE_HISTORY,
     PLAYER_STATE_KEY,
     PREFERENCE_DEFAULTS,
+    complete_basic_tutorial,
+    complete_card_tutorial,
     default_player_state,
     ensure_player_state,
     normalize_player_state,
@@ -14,6 +16,8 @@ from player_state import (
     store_player_state,
     unlock_collection,
     update_deck,
+    update_basic_tutorial_stage,
+    update_card_tutorial_stage,
     update_formation,
     update_mode,
     update_preference,
@@ -37,7 +41,146 @@ class PlayerStateTests(unittest.TestCase):
             second["profile"]["selected_symbol"],
             second["collection"]["unlocked_symbols"][0],
         )
+        self.assertEqual(
+            second["tutorials"],
+            {
+                "basic_stage": 0,
+                "basic_completed": False,
+                "card_stages": {},
+                "completed_cards": [],
+                "unlocked_official_decks": [],
+            },
+        )
         json.dumps(second)
+
+    def test_tutorial_progress_normalizes_corrupt_and_legacy_values(self) -> None:
+        state = normalize_player_state(
+            {
+                "tutorials": {
+                    "basic": {"stage": "6", "completed": "yes"},
+                    "card_stages": {
+                        "infantry_1": "3",
+                        "infantry_2": -5,
+                        "armor_1": {"progress": "4", "completed": "true"},
+                        "infantry_3": 7,
+                        "not_a_card": 9,
+                        3: 2,
+                    },
+                    "completed_cards": [
+                        "infantry_1",
+                        "infantry_3",
+                        "not_a_card",
+                        4,
+                    ],
+                    "unlocked_official_decks": [
+                        "official.infantry-1",
+                        "space deck",
+                        "",
+                        7,
+                        "official.infantry-1",
+                    ],
+                }
+            }
+        )
+
+        self.assertEqual(state["tutorials"]["basic_stage"], 6)
+        self.assertTrue(state["tutorials"]["basic_completed"])
+        self.assertEqual(
+            state["tutorials"]["card_stages"],
+            {"infantry_1": 3, "infantry_2": 0, "armor_1": 4},
+        )
+        self.assertEqual(
+            state["tutorials"]["completed_cards"],
+            ["armor_1", "infantry_1"],
+        )
+        self.assertEqual(
+            state["tutorials"]["unlocked_official_decks"],
+            ["official.infantry-1"],
+        )
+        self.assertNotIn("infantry_3", state["tutorials"]["card_stages"])
+        json.dumps(state)
+
+        legacy = normalize_player_state(
+            {
+                "basic_tutorial_stage": "2",
+                "basic_tutorial_completed": 0,
+                "card_tutorial_stages": {"recon_1": "1"},
+                "completed_tutorial_cards": ["recon_1"],
+                "unlocked_official_decks": ["recon_1"],
+            }
+        )
+        self.assertEqual(legacy["tutorials"]["basic_stage"], 2)
+        self.assertFalse(legacy["tutorials"]["basic_completed"])
+        self.assertEqual(legacy["tutorials"]["card_stages"], {"recon_1": 1})
+        self.assertEqual(legacy["tutorials"]["completed_cards"], ["recon_1"])
+        self.assertEqual(
+            legacy["tutorials"]["unlocked_official_decks"], ["recon_1"]
+        )
+
+    def test_tutorial_updates_are_monotonic_and_detached(self) -> None:
+        original = default_player_state()
+        basic = update_basic_tutorial_stage(original, 3)
+        basic = update_basic_tutorial_stage(basic, 1)
+        basic = complete_basic_tutorial(basic, final_stage=8)
+
+        self.assertEqual(original["tutorials"]["basic_stage"], 0)
+        self.assertEqual(basic["tutorials"]["basic_stage"], 8)
+        self.assertTrue(basic["tutorials"]["basic_completed"])
+
+        card = update_card_tutorial_stage(basic, "infantry_1", 2)
+        card = update_card_tutorial_stage(card, "infantry_1", 1)
+        card = complete_card_tutorial(
+            card,
+            "infantry_1",
+            official_deck_id="official.infantry-1",
+            final_stage=5,
+        )
+        card = complete_card_tutorial(
+            card,
+            "infantry_1",
+            official_deck_id="official.infantry-1",
+            final_stage=4,
+        )
+
+        self.assertEqual(card["tutorials"]["card_stages"]["infantry_1"], 5)
+        self.assertEqual(card["tutorials"]["completed_cards"], ["infantry_1"])
+        self.assertEqual(
+            card["tutorials"]["unlocked_official_decks"],
+            ["official.infantry-1"],
+        )
+        self.assertNotIn("infantry_1", basic["tutorials"]["card_stages"])
+        json.dumps(card)
+
+        storage: dict[str, object] = {}
+        persisted = store_player_state(storage, card)
+        reloaded = ensure_player_state(storage)
+        self.assertEqual(reloaded["tutorials"], persisted["tutorials"])
+
+    def test_card_tutorial_requires_owned_card_and_valid_progress(self) -> None:
+        state = default_player_state()
+        with self.assertRaises(ValueError):
+            update_card_tutorial_stage(state, "infantry_3", 1)
+        with self.assertRaises(ValueError):
+            complete_card_tutorial(state, "infantry_3")
+        with self.assertRaises(ValueError):
+            update_card_tutorial_stage(state, "not_a_card", 1)
+        with self.assertRaises(ValueError):
+            update_basic_tutorial_stage(state, -1)
+        with self.assertRaises(ValueError):
+            update_basic_tutorial_stage(state, True)  # type: ignore[arg-type]
+        with self.assertRaises(ValueError):
+            update_card_tutorial_stage(state, "infantry_1", "2")  # type: ignore[arg-type]
+        with self.assertRaises(ValueError):
+            complete_card_tutorial(
+                state, "infantry_1", official_deck_id="contains spaces"
+            )
+
+        owned = unlock_collection(state, cards=["infantry_3"])
+        completed = complete_card_tutorial(owned, "infantry_3", final_stage=4)
+        self.assertIn("infantry_3", completed["tutorials"]["completed_cards"])
+        self.assertIn(
+            "infantry_3", completed["tutorials"]["unlocked_official_decks"]
+        )
 
     def test_profile_normalizes_nested_and_legacy_root_values(self) -> None:
         legacy = normalize_player_state(

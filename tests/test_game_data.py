@@ -1,6 +1,6 @@
 import unittest
 
-from game_data import CARDS, ROLE_INFO, STARTER_DECK, analyze_deck, get_card
+from game_data import CARDS, GLOSSARY, ROLE_INFO, STARTER_DECK, analyze_deck, get_card
 from symbol_catalog import (
     CARD_SYMBOL_IDS,
     FAMILY_INDEX,
@@ -25,6 +25,16 @@ class GameDataTests(unittest.TestCase):
         for card in CARDS:
             with self.subTest(card=card.id):
                 self.assertTrue(card.game_text.strip())
+
+    def test_beginner_copy_does_not_invent_rows_inside_a_lane(self) -> None:
+        copy = " ".join(
+            [
+                *(str(info["plain"]) for info in ROLE_INFO.values()),
+                *(explanation for _, explanation in GLOSSARY),
+            ]
+        )
+        self.assertNotIn("前列", copy)
+        self.assertNotIn("支援列", copy)
 
     def test_card_copy_does_not_promise_unimplemented_rules(self) -> None:
         forbidden_phrases = (

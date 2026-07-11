@@ -9,6 +9,7 @@ when new state is written.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping, MutableMapping, Sequence
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -20,7 +21,7 @@ from symbol_catalog import CARD_SYMBOL_IDS, SYMBOL_INDEX
 
 
 PLAYER_STATE_KEY = "player_state"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_DECK_SIZE = 12
 MAX_BATTLE_HISTORY = 50
 DEFAULT_DISPLAY_NAME = "COMMANDER"
@@ -105,6 +106,7 @@ _PREFERENCE_ALIASES = {
     "share_history": "history_public",
     "share_collection": "cards_public",
 }
+_OFFICIAL_DECK_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$")
 _LEGACY_ROOT_KEYS = frozenset(
     {
         "preferences",
@@ -125,6 +127,14 @@ _LEGACY_ROOT_KEYS = frozenset(
         "display_name",
         "tagline",
         "selected_symbol",
+        "tutorials",
+        "tutorial_progress",
+        "basic_tutorial",
+        "basic_tutorial_stage",
+        "basic_tutorial_completed",
+        "card_tutorial_stages",
+        "completed_tutorial_cards",
+        "unlocked_official_decks",
         *PREFERENCE_DEFAULTS,
         *_PREFERENCE_ALIASES,
     }
@@ -152,6 +162,13 @@ def default_player_state() -> dict[str, Any]:
         "deck": list(STARTER_DECK),
         "selected_formation": "native",
         "selected_mode": "training",
+        "tutorials": {
+            "basic_stage": 0,
+            "basic_completed": False,
+            "card_stages": {},
+            "completed_cards": [],
+            "unlocked_official_decks": [],
+        },
         "battle_history": [],
         "stats": _default_stats(),
     }
@@ -182,6 +199,7 @@ def normalize_player_state(raw: object) -> dict[str, Any]:
     state["selected_mode"] = _normalize_mode(
         source.get("selected_mode", source.get("mode"))
     )
+    state["tutorials"] = _normalize_tutorials(source, collection["owned_cards"])
 
     history_source = source.get("battle_history", source.get("history"))
     history = _normalize_history(history_source, collection["owned_cards"])
@@ -323,6 +341,81 @@ def update_formation(state: object, formation: str) -> dict[str, Any]:
     if canonical not in updated["collection"]["unlocked_formations"]:
         raise ValueError(f"Formation is not unlocked: {canonical}")
     updated["selected_formation"] = canonical
+    return updated
+
+
+def update_basic_tutorial_stage(state: object, stage: int) -> dict[str, Any]:
+    """Advance the saved basic-game tutorial stage.
+
+    Progress is monotonic: saving an earlier stage is a harmless no-op.  Stage
+    zero is valid so callers can use either zero- or one-based presentation
+    without special migration logic.
+    """
+
+    validated_stage = _require_tutorial_stage(stage)
+    updated = normalize_player_state(state)
+    tutorials = updated["tutorials"]
+    tutorials["basic_stage"] = max(tutorials["basic_stage"], validated_stage)
+    return updated
+
+
+def complete_basic_tutorial(
+    state: object, *, final_stage: int | None = None
+) -> dict[str, Any]:
+    """Mark the staged basic-game tutorial as completed.
+
+    ``final_stage`` can be supplied by the UI to atomically preserve the last
+    displayed stage.  Omitting it keeps the current saved progress.
+    """
+
+    updated = normalize_player_state(state)
+    if final_stage is not None:
+        updated = update_basic_tutorial_stage(updated, final_stage)
+    updated["tutorials"]["basic_completed"] = True
+    return updated
+
+
+def update_card_tutorial_stage(
+    state: object, card_id: str, stage: int
+) -> dict[str, Any]:
+    """Advance one owned card's tutorial progress without moving backwards."""
+
+    validated_card = _require_owned_tutorial_card(state, card_id)
+    validated_stage = _require_tutorial_stage(stage)
+    updated = normalize_player_state(state)
+    stages = updated["tutorials"]["card_stages"]
+    stages[validated_card] = max(stages.get(validated_card, 0), validated_stage)
+    return updated
+
+
+def complete_card_tutorial(
+    state: object,
+    card_id: str,
+    *,
+    official_deck_id: str | None = None,
+    final_stage: int | None = None,
+) -> dict[str, Any]:
+    """Complete an owned card tutorial and unlock its official deck recipe.
+
+    By default the recipe ID is the card ID.  A separate safe identifier may
+    be supplied so the UI/data layer can name recipes independently without
+    making this persistence module depend on tutorial content definitions.
+    """
+
+    validated_card = _require_owned_tutorial_card(state, card_id)
+    deck_id = _require_official_deck_id(
+        validated_card if official_deck_id is None else official_deck_id
+    )
+    updated = normalize_player_state(state)
+    if final_stage is not None:
+        updated = update_card_tutorial_stage(updated, validated_card, final_stage)
+    tutorials = updated["tutorials"]
+    tutorials["completed_cards"] = _ordered_union(
+        tutorials["completed_cards"], [validated_card]
+    )
+    tutorials["unlocked_official_decks"] = _ordered_union(
+        tutorials["unlocked_official_decks"], [deck_id]
+    )
     return updated
 
 
@@ -562,6 +655,98 @@ def _normalize_collection(source: Mapping[str, Any]) -> dict[str, list[str]]:
     }
 
 
+def _normalize_tutorials(
+    source: Mapping[str, Any], owned_cards: Sequence[str]
+) -> dict[str, Any]:
+    """Normalize current and legacy tutorial progress into one compact shape."""
+
+    raw_tutorials = source.get("tutorials")
+    if not isinstance(raw_tutorials, Mapping):
+        raw_tutorials = source.get("tutorial_progress")
+    tutorials = raw_tutorials if isinstance(raw_tutorials, Mapping) else {}
+
+    raw_basic = tutorials.get("basic")
+    if not isinstance(raw_basic, Mapping):
+        raw_basic = source.get("basic_tutorial")
+    basic = raw_basic if isinstance(raw_basic, Mapping) else {}
+    basic_stage = _coerce_nonnegative_int(
+        tutorials.get(
+            "basic_stage",
+            basic.get("stage", source.get("basic_tutorial_stage", 0)),
+        )
+    )
+    raw_basic_completed = tutorials.get(
+        "basic_completed",
+        basic.get("completed", source.get("basic_tutorial_completed", False)),
+    )
+    basic_completed = _coerce_bool(raw_basic_completed) or False
+
+    raw_card_stages = tutorials.get("card_stages")
+    if not isinstance(raw_card_stages, Mapping):
+        raw_card_stages = tutorials.get("stage_progress")
+    if not isinstance(raw_card_stages, Mapping):
+        raw_card_stages = source.get("card_tutorial_stages")
+    # Some early prototypes stored card IDs directly in tutorial_progress.
+    if not isinstance(raw_card_stages, Mapping) and any(
+        key in CARD_INDEX for key in tutorials
+    ):
+        raw_card_stages = tutorials
+    card_stage_source = (
+        raw_card_stages if isinstance(raw_card_stages, Mapping) else {}
+    )
+
+    owned = set(owned_cards)
+    card_stages: dict[str, int] = {}
+    completed_from_entries: list[str] = []
+    for card_id, raw_progress in card_stage_source.items():
+        if (
+            not isinstance(card_id, str)
+            or card_id not in CARD_INDEX
+            or card_id not in owned
+        ):
+            continue
+        if isinstance(raw_progress, Mapping):
+            raw_stage = raw_progress.get("stage", raw_progress.get("progress", 0))
+            if _coerce_bool(raw_progress.get("completed")) is True:
+                completed_from_entries.append(card_id)
+        else:
+            raw_stage = raw_progress
+        card_stages[card_id] = _coerce_nonnegative_int(raw_stage)
+
+    raw_completed = tutorials.get(
+        "completed_cards",
+        tutorials.get(
+            "completed_tutorial_cards",
+            source.get("completed_tutorial_cards"),
+        ),
+    )
+    completed_cards = _ordered_union(
+        completed_from_entries,
+        (
+            card_id
+            for card_id in _string_values(raw_completed)
+            if card_id in CARD_INDEX and card_id in owned
+        ),
+    )
+
+    raw_decks = tutorials.get(
+        "unlocked_official_decks", source.get("unlocked_official_decks")
+    )
+    unlocked_official_decks = [
+        deck_id
+        for deck_id in _string_values(raw_decks)
+        if _official_deck_id_is_safe(deck_id)
+    ]
+
+    return {
+        "basic_stage": basic_stage,
+        "basic_completed": basic_completed,
+        "card_stages": card_stages,
+        "completed_cards": completed_cards,
+        "unlocked_official_decks": unlocked_official_decks,
+    }
+
+
 def _normalize_deck(raw: object, owned_cards: Sequence[str]) -> list[str]:
     if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
         return [card_id for card_id in STARTER_DECK if card_id in owned_cards]
@@ -702,6 +887,34 @@ def _coerce_nonnegative_int(value: object) -> int:
 def _require_nonnegative_int(value: object, name: str) -> int:
     if type(value) is not int or value < 0:
         raise ValueError(f"{name} must be a non-negative integer")
+    return value
+
+
+def _require_tutorial_stage(value: object) -> int:
+    return _require_nonnegative_int(value, "tutorial stage")
+
+
+def _require_owned_tutorial_card(state: object, card_id: object) -> str:
+    if not isinstance(card_id, str) or card_id not in CARD_INDEX:
+        raise ValueError(f"Unknown card ID: {card_id}")
+    normalized = normalize_player_state(state)
+    if card_id not in normalized["collection"]["owned_cards"]:
+        raise ValueError(f"Card is not owned: {card_id}")
+    return card_id
+
+
+def _official_deck_id_is_safe(value: object) -> bool:
+    return isinstance(value, str) and bool(
+        _OFFICIAL_DECK_ID_PATTERN.fullmatch(value)
+    )
+
+
+def _require_official_deck_id(value: object) -> str:
+    if not _official_deck_id_is_safe(value):
+        raise ValueError(
+            "official_deck_id must be 1 to 80 ASCII letters, numbers, or ._:-"
+        )
+    assert isinstance(value, str)
     return value
 
 

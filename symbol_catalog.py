@@ -159,7 +159,7 @@ SYMBOL_FAMILIES: tuple[SymbolFamily, ...] = (
     ),
     SymbolFamily(
         "artillery", "砲兵組織", PlayKind.SUPPORT, Domain.LAND,
-        UnlockStage.INTRO, "●", "見つけた相手を、後ろから支援します。",
+        UnlockStage.INTRO, "●", "同じ戦線の制圧部隊を、大きな支援力で助けます。",
         (
             "砲兵", "機械化砲兵", "自走砲（装軌式）", "自走砲（装輪式）",
             "牽引砲", "ロケット砲", "迫撃砲", "機械化迫撃砲（装輪式）",

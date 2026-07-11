@@ -10,6 +10,7 @@ from typing import Callable, Iterator
 
 from nicegui import app, ui
 
+from basic_tutorial import BASIC_TUTORIAL_LESSONS, BasicLesson
 from game_data import (
     CARDS,
     FORMATION_SCALES,
@@ -22,6 +23,16 @@ from game_data import (
     get_card,
     get_formation,
 )
+from tutorial_data import (
+    CARD_TUTORIALS,
+    OFFICIAL_DECKS,
+    CardTutorial,
+    OfficialDeck,
+    deck_missing_cards,
+    deck_owned_cards_in_order,
+    get_official_deck,
+    get_tutorial,
+)
 from symbol_catalog import (
     STAGE_LABELS,
     SYMBOL_CATALOG,
@@ -30,8 +41,12 @@ from symbol_catalog import (
     symbols_for_family,
 )
 from player_state import (
+    complete_basic_tutorial,
+    complete_card_tutorial,
     ensure_player_state,
     store_player_state,
+    update_basic_tutorial_stage,
+    update_card_tutorial_stage,
     update_deck as update_state_deck,
     update_formation as update_state_formation,
     update_mode as update_state_mode,
@@ -73,17 +88,18 @@ NAV_ITEMS = (
     ("/", "ホーム", "grid_view"),
     ("/lobby", "遊ぶ", "play_circle"),
     ("/cards", "コレクション", "style"),
-    ("/learn", "遊び方", "help_outline"),
+    ("/tutorials", "チュートリアル", "school"),
 )
 
 MORE_NAV_ITEMS = (
     ("/deck", "デッキ編成", "view_carousel"),
+    ("/learn", "説明書・用語集", "menu_book"),
     ("/profile", "記録・プロフィール", "military_tech"),
     ("/settings", "設定", "tune"),
 )
 
 PHASES = (
-    ("命令公開", "両者が選んだカードと配置先を同時に公開します。"),
+    ("配置決定", "両者の配置先が同時に決まります。相手カードの正体はまだ未確認です。"),
     ("索敵", "偵察値のぶん、同じ戦線の未確認部隊を公開します。"),
     ("補給", "補給の生成量と、機甲・砲兵が必要とする量を比べます。"),
     ("戦線力", "制圧に、有効な支援と完全補給の機甲ボーナスを加えます。"),
@@ -98,7 +114,7 @@ TUTORIAL_STEPS = (
     ("支援", "支援力は、同じ戦線に味方の制圧力があるときだけ戦線力へ加わります。"),
     ("補給", "補給需要を満たせないと不足分だけ戦線力が下がります。"),
     ("機甲", "機甲は補給需要を完全に満たすと、1部隊につき戦線力が2上がります。"),
-    ("同時命令", "あなたと相手の命令は同時に公開されます。相手の行動を予想するのがポイントです。"),
+    ("同時命令", "あなたと相手の配置先は同時に決まります。相手カードの正体は偵察まで未確認です。"),
 )
 
 def get_preferences() -> dict[str, object]:
@@ -285,7 +301,14 @@ def card_detail_dialog(card: UnitCard) -> ui.dialog:
                 with ui.element("div").classes("beginner-callout term-explanation"):
                     ui.label("記号の見方").classes("font-bold")
                     ui.label("外側の枠は部隊、中央は主な役割、上側の文字は本作での部隊規模を示します。").classes("text-sm")
-        secondary_button("閉じる", icon="close", on_click=dialog.close)
+        with ui.row().classes("gap-2"):
+            if card.owned:
+                primary_button(
+                    "このカードを練習",
+                    icon="school",
+                    on_click=lambda: go(f"/tutorials/card/{card.id}"),
+                )
+            secondary_button("閉じる", icon="close", on_click=dialog.close)
     return dialog
 
 
@@ -345,6 +368,12 @@ def beginner_card(card: UnitCard) -> None:
         ui.button("このカードだけ詳しく見る", icon="arrow_forward", on_click=dialog.open).props(
             "flat no-caps"
         ).classes("card-action")
+        if card.owned:
+            ui.button(
+                "使い方を5章で練習",
+                icon="school",
+                on_click=lambda: go(f"/tutorials/card/{card.id}"),
+            ).props("flat no-caps").classes("card-action")
 
 
 def action_step(number: int, label: str, *, active: bool = False, done: bool = False) -> None:
@@ -352,6 +381,137 @@ def action_step(number: int, label: str, *, active: bool = False, done: bool = F
     with ui.element("div").classes(f"action-step{state_class}"):
         ui.label("✓" if done else str(number)).classes("action-step__number")
         ui.label(label).classes("action-step__label")
+
+
+def tutorial_progress(completed_steps: int, total_steps: int) -> tuple[int, float]:
+    """Clamp persisted progress for safe display after future course edits."""
+
+    completed = max(0, min(total_steps, int(completed_steps)))
+    return completed, completed / total_steps if total_steps else 1.0
+
+
+def apply_official_deck(
+    deck: OfficialDeck, *, on_applied: Callable[[], None] | None = None
+) -> None:
+    """Select the owned portion of an unlocked twelve-slot official recipe."""
+
+    state = ensure_player_state(app.storage.user)
+    if deck.id not in state["tutorials"]["unlocked_official_decks"]:
+        ui.notify("この公式デッキは、対応するカード訓練を終えると選べます。", type="warning")
+        return
+    owned = set(state["collection"]["owned_cards"])
+    selected_cards = list(deck_owned_cards_in_order(deck, owned))
+    missing = deck_missing_cards(deck, owned)
+    try:
+        state = update_state_deck(state, selected_cards)
+    except ValueError as error:
+        ui.notify(str(error), type="negative")
+        return
+    store_player_state(app.storage.user, state)
+    if missing:
+        ui.notify(
+            f"所持している{len(selected_cards)}枚をセットしました。未所持の{len(missing)}枠は空白です。",
+            type="warning",
+        )
+    else:
+        ui.notify("公式デッキ12枚をセットしました。", type="positive")
+    if on_applied is not None:
+        on_applied()
+
+
+def official_deck_preview(
+    deck: OfficialDeck,
+    *,
+    allow_apply: bool = True,
+    on_applied: Callable[[], None] | None = None,
+) -> None:
+    """Render all recipe positions, preserving unowned cards as named blanks."""
+
+    player = ensure_player_state(app.storage.user)
+    owned = set(player["collection"]["owned_cards"])
+    missing = deck_missing_cards(deck, owned)
+    selected_cards = list(deck_owned_cards_in_order(deck, owned))
+    is_selected = list(player["deck"]) == selected_cards
+
+    with ui.column().classes("w-full gap-3"):
+        with ui.row().classes("w-full items-start justify-between gap-3"):
+            with ui.column().classes("gap-1 flex-1"):
+                with ui.row().classes("items-center gap-2"):
+                    ui.label(deck.name).classes("section-title")
+                    if is_selected:
+                        chip("選択中", "green")
+                ui.label(deck.summary).classes("section-subtitle")
+            chip(f"{len(selected_cards)} / 12枚", "green" if not missing else "yellow")
+
+        if missing:
+            with ui.element("div").classes("missing-card-notice"):
+                ui.icon("inventory_2", size="22px")
+                with ui.column().classes("gap-1"):
+                    ui.label(f"未所持カード：{'・'.join(card.name for card in missing)}").classes("font-bold text-sm")
+                    ui.label("選択すると、この場所は代用品を入れず空白のままになります。").classes("text-xs")
+        else:
+            with ui.element("div").classes("beginner-callout"):
+                ui.label("12枚すべて所持しています。完成した形で使えます。").classes("text-sm font-bold")
+
+        with ui.element("div").classes("official-deck-grid"):
+            for slot, card_id in enumerate(deck.card_ids, 1):
+                card = get_card(card_id)
+                if card_id in owned:
+                    with ui.element("div").classes("official-deck-slot"):
+                        ui.label(f"{slot:02}").classes("official-deck-slot__number")
+                        unit_symbol(card, "sm")
+                        ui.label(card.name).classes("official-deck-slot__name")
+                        ui.label(card.branch).classes("muted text-xs")
+                else:
+                    with ui.element("div").classes("official-deck-slot official-deck-slot--missing"):
+                        ui.label(f"{slot:02}").classes("official-deck-slot__number")
+                        ui.icon("crop_square", size="34px")
+                        ui.label("空白").classes("font-bold")
+                        ui.label(f"未所持：{card.name}").classes("official-deck-slot__missing-name")
+
+        with ui.element("div").classes("tutorial-strategy"):
+            ui.label("このデッキの基本作戦").classes("blue-text text-xs font-bold")
+            ui.label(deck.strategy).classes("section-subtitle")
+
+        if allow_apply:
+            with ui.row().classes("items-center gap-3"):
+                primary_button(
+                    "この公式デッキを選択",
+                    icon="check_circle",
+                    on_click=lambda: apply_official_deck(deck, on_applied=on_applied),
+                )
+                if missing and len(selected_cards) < 6:
+                    ui.label("空白が多いため、対戦前に6枚以上へ調整してください。").classes("danger-text text-xs")
+                elif missing:
+                    ui.label("空白があっても、所持分が6枚以上なら対戦できます。").classes("muted text-xs")
+
+
+def card_tutorial_tile(tutorial: CardTutorial, player: dict[str, object]) -> None:
+    """Render one compact course card for the tutorial hub."""
+
+    card = get_card(tutorial.card_id)
+    tutorials = player["tutorials"]  # type: ignore[index]
+    completed_cards = set(tutorials["completed_cards"])  # type: ignore[index]
+    saved_steps = tutorials["card_stages"].get(card.id, 0)  # type: ignore[index]
+    complete = card.id in completed_cards
+    completed, value = tutorial_progress(
+        len(tutorial.stages) if complete else saved_steps, len(tutorial.stages)
+    )
+    reward = get_official_deck(tutorial.reward_deck_id)
+    with ui.card().classes("tutorial-course-card"):
+        with ui.row().classes("items-center gap-3 no-wrap"):
+            unit_symbol(card, "sm")
+            with ui.column().classes("gap-0 min-w-0 flex-1"):
+                ui.label(card.name).classes("font-bold")
+                ui.label(f"{card.branch}・全{len(tutorial.stages)}章").classes("muted text-xs")
+            chip("完了", "green") if complete else chip(f"{completed}/{len(tutorial.stages)}")
+        ui.linear_progress(value=value).props("rounded size=7px").classes("progress-track")
+        ui.label(f"修了報酬：{reward.name}").classes("section-subtitle")
+        ui.button(
+            "報酬を見る・復習" if complete else "続きから始める" if completed else "このカードを学ぶ",
+            icon="school",
+            on_click=lambda: go(f"/tutorials/card/{card.id}"),
+        ).props("flat no-caps").classes("card-action")
 
 
 @contextmanager
@@ -434,6 +594,7 @@ def page_shell(active: str, eyebrow: str, title: str, subtitle: str) -> Iterator
 @ui.page("/")
 def home_page() -> None:
     player = ensure_player_state(app.storage.user)
+    needs_basic_tutorial = not bool(player["tutorials"]["basic_completed"])
     active_match = load_match(app.storage.user)
     online_view = poll_multiplayer(app.storage.user)
     online_status = str(online_view.get("status", "idle"))
@@ -453,12 +614,18 @@ def home_page() -> None:
         "オンライン待機へ戻る" if online_status in {"waiting", "waiting_friend"}
         else "オンライン対戦を続ける" if online_active
         else "演習を続ける" if active_match and active_match.phase is not Phase.COMPLETE
+        else "遊び方を一つずつ練習する" if needs_basic_tutorial
         else "5分演習を始める"
     )
 
     def home_primary_action() -> None:
         if online_active:
             go(online_path)
+            return
+        if needs_basic_tutorial and not (
+            active_match and active_match.phase is not Phase.COMPLETE
+        ):
+            go("/tutorials/basic")
             return
         begin_training(reset=not (active_match and active_match.phase is not Phase.COMPLETE))
     with page_shell(
@@ -468,8 +635,13 @@ def home_page() -> None:
         with ui.element("section").classes("start-here"):
             with ui.column().classes("start-here__copy gap-2"):
                 chip("最初に見る場所", "green")
-                ui.label("5分演習で、カードを1枚置いてみる").classes("start-here__title")
                 ui.label(
+                    "9章で遊び方を一つずつ試す" if needs_basic_tutorial
+                    else "5分演習で、カードを1枚置いてみる"
+                ).classes("start-here__title")
+                ui.label(
+                    "勝ち方から始め、一画面に一つの課題だけを表示します。数値や用語を一度に覚える必要はありません。"
+                    if needs_basic_tutorial else
                     "覚えるのは『カードを選ぶ → 場所を選ぶ → 決定する』の3つだけ。"
                     "軍事用語や細かい数値は、まだ読まなくて構いません。"
                 ).classes("start-here__description")
@@ -477,9 +649,14 @@ def home_page() -> None:
                     cta_label, icon="play_arrow", on_click=home_primary_action,
                 ).classes("start-here__button")
             with ui.element("div").classes("start-here__steps"):
-                action_step(1, "カードを選ぶ", active=True)
-                action_step(2, "場所を選ぶ")
-                action_step(3, "決定する")
+                if needs_basic_tutorial:
+                    action_step(1, "勝ち方を知る", active=True)
+                    action_step(2, "一手を操作する")
+                    action_step(3, "結果を理解する")
+                else:
+                    action_step(1, "カードを選ぶ", active=True)
+                    action_step(2, "場所を選ぶ")
+                    action_step(3, "決定する")
 
         with ui.card().classes("panel simple-rule"):
             with ui.row().classes("items-center gap-3 no-wrap"):
@@ -495,8 +672,591 @@ def home_page() -> None:
                 metric_card("対戦記録", f"{stats['battles_played']} 戦", f"{stats['wins']}勝・{stats['losses']}敗", "green-text")
                 metric_card("記号図鑑", f"{len(player['collection']['unlocked_symbols'])} / {len(SYMBOL_CATALOG)}", "一度に覚えなくて大丈夫", "yellow-text")
             with ui.row().classes("gap-3 mt-4"):
+                secondary_button("チュートリアル", "/tutorials", "school")
                 secondary_button("通常対戦へ", "/lobby", "swords")
                 secondary_button("カードを見る", "/cards", "style")
+
+
+@ui.page("/tutorials")
+def tutorials_page() -> None:
+    with page_shell(
+        "/tutorials", "TRAINING CENTER", "一つずつ覚える訓練所",
+        "最初にゲーム全体を9章で練習し、その後は所持カードを1枚ずつ試せます。今必要な課題だけ開きます。",
+    ):
+        player = ensure_player_state(app.storage.user)
+        tutorial_state = player["tutorials"]
+        basic_complete = bool(tutorial_state["basic_completed"])
+        basic_done, basic_value = tutorial_progress(
+            len(BASIC_TUTORIAL_LESSONS) if basic_complete else tutorial_state["basic_stage"],
+            len(BASIC_TUTORIAL_LESSONS),
+        )
+
+        with ui.element("section").classes("tutorial-hero"):
+            with ui.column().classes("gap-2 flex-1"):
+                chip("最初はこちら", "green" if not basic_complete else "")
+                ui.label("はじめての作戦").classes("start-here__title")
+                ui.label(
+                    "勝ち方から、カードを選ぶ・戦線を選ぶ・命令を確定するところまで、"
+                    "一画面に一つの操作だけで練習します。"
+                ).classes("start-here__description")
+                with ui.row().classes("items-center gap-3 w-full max-w-2xl mt-2"):
+                    ui.linear_progress(value=basic_value).props("rounded size=9px").classes("progress-track flex-1")
+                    ui.label(f"{basic_done} / {len(BASIC_TUTORIAL_LESSONS)}章").classes("mono text-sm")
+                primary_button(
+                    "完了内容を見る" if basic_complete else "続きから始める" if basic_done else "第1章から始める",
+                    "/tutorials/basic",
+                    "play_arrow",
+                ).classes("start-here__button")
+            with ui.element("div").classes("tutorial-hero__map"):
+                action_step(1, "入門：勝ち方と命令", active=basic_done < 4, done=basic_done >= 4)
+                action_step(2, "戦線力：支援と補給", active=4 <= basic_done < 7, done=basic_done >= 7)
+                action_step(3, "実戦判断：偵察と勝敗", active=7 <= basic_done < 9, done=basic_complete)
+
+        owned = set(player["collection"]["owned_cards"])
+        completed_cards = set(tutorial_state["completed_cards"])
+        card_stages = tutorial_state["card_stages"]
+        owned_tutorials = [tutorial for tutorial in CARD_TUTORIALS if tutorial.card_id in owned]
+        unfinished = [
+            tutorial for tutorial in owned_tutorials
+            if tutorial.card_id not in completed_cards
+        ]
+        recommended = sorted(
+            unfinished,
+            key=lambda tutorial: (
+                0 if int(card_stages.get(tutorial.card_id, 0)) > 0 else 1,
+                -int(card_stages.get(tutorial.card_id, 0)),
+                list(ROLE_INFO).index(get_card(tutorial.card_id).branch),
+            ),
+        )[:3]
+
+        section_heading(
+            "次におすすめのカード訓練",
+            "基礎コースとは別に、今持っているカードの数字・置き場所・組み合わせを5章で学べます。",
+        )
+        if recommended:
+            with ui.element("div").classes("tutorial-course-grid"):
+                for tutorial in recommended:
+                    card_tutorial_tile(tutorial, player)
+        else:
+            with ui.element("div").classes("beginner-callout"):
+                ui.label("所持カードの訓練をすべて完了しました。").classes("font-bold")
+                ui.label("新しいカードを入手すると、そのカードの訓練がここに追加されます。").classes("text-sm")
+
+        with ui.expansion(
+            f"所持カード別の全コースを見る（{len(owned_tutorials)}枚）",
+            icon="view_module",
+        ).classes("details-expansion"):
+            ui.label("兵科を一つだけ開いて選べます。全部を一度に見る必要はありません。").classes("section-subtitle mt-2")
+            with ui.column().classes("w-full gap-2 mt-3"):
+                for branch in ROLE_INFO:
+                    branch_tutorials = [
+                        tutorial for tutorial in owned_tutorials
+                        if get_card(tutorial.card_id).branch == branch
+                    ]
+                    if not branch_tutorials:
+                        continue
+                    branch_complete = sum(
+                        tutorial.card_id in completed_cards for tutorial in branch_tutorials
+                    )
+                    with ui.expansion(
+                        f"{branch}　{branch_complete} / {len(branch_tutorials)}完了",
+                        icon=str(ROLE_INFO[branch]["icon"]),
+                    ).classes("tutorial-branch-expansion"):
+                        with ui.element("div").classes("tutorial-course-grid mt-3"):
+                            for tutorial in branch_tutorials:
+                                card_tutorial_tile(tutorial, player)
+
+        unlocked_ids = set(tutorial_state["unlocked_official_decks"])
+        unlocked_decks = [deck for deck in OFFICIAL_DECKS if deck.id in unlocked_ids]
+        section_heading(
+            "受け取った公式デッキ",
+            "カード訓練を一つ終えるたび、そのカードを含む12枠のおすすめ構成が増えます。",
+        )
+        if not unlocked_decks:
+            with ui.card().classes("panel panel--compact"):
+                ui.label("まだ公式デッキはありません").classes("font-bold")
+                ui.label("上のカード訓練を1つ完了すると、最初の公式デッキを受け取れます。").classes("section-subtitle")
+        else:
+            with ui.column().classes("w-full gap-2"):
+                for deck in unlocked_decks:
+                    missing_count = len(deck_missing_cards(deck, owned))
+                    with ui.expansion(
+                        f"{deck.name}　{'完成' if not missing_count else f'空白 {missing_count}枠'}",
+                        icon="view_carousel",
+                    ).classes("details-expansion"):
+                        with ui.card().classes("panel mt-3"):
+                            official_deck_preview(deck)
+
+        locked_tutorials = [
+            tutorial for tutorial in CARD_TUTORIALS if tutorial.card_id not in owned
+        ]
+        if locked_tutorials:
+            with ui.expansion(
+                f"まだ持っていないカードの訓練（{len(locked_tutorials)}枚）",
+                icon="lock",
+            ).classes("details-expansion"):
+                ui.label("対戦完了でカードを入手すると、対応する訓練が自動で開きます。").classes("section-subtitle mt-2")
+                with ui.element("div").classes("locked-tutorial-grid mt-3"):
+                    for tutorial in locked_tutorials:
+                        card = get_card(tutorial.card_id)
+                        with ui.element("div").classes("locked-tutorial-row"):
+                            ui.icon("lock_outline")
+                            with ui.column().classes("gap-0"):
+                                ui.label(card.name).classes("font-bold text-sm")
+                                ui.label(f"{card.branch}・カード入手後に開放").classes("muted text-xs")
+
+
+@ui.page("/tutorials/basic")
+def basic_tutorial_page() -> None:
+    total_lessons = len(BASIC_TUTORIAL_LESSONS)
+    initial = ensure_player_state(app.storage.user)["tutorials"]
+    initial_index = min(int(initial["basic_stage"]), total_lessons - 1)
+    view: dict[str, object] = {
+        "index": initial_index,
+        "answer": "",
+        "feedback": "",
+        "correct": False,
+        "selected_card": "",
+        "selected_lane": "",
+        "revealed": False,
+        "completion": bool(initial["basic_completed"]),
+    }
+
+    def reset_interaction() -> None:
+        view.update(
+            answer="",
+            feedback="",
+            correct=False,
+            selected_card="",
+            selected_lane="",
+            revealed=False,
+        )
+
+    def show_lesson(index: int) -> None:
+        view["completion"] = False
+        view["index"] = max(0, min(total_lessons - 1, index))
+        reset_interaction()
+        lesson_view.refresh()
+        ui.run_javascript("window.scrollTo({top: 0, behavior: 'auto'})")
+
+    def answer_choice(lesson: BasicLesson, choice: str) -> None:
+        view["answer"] = choice
+        if choice == lesson.correct_choice:
+            view["correct"] = True
+            view["feedback"] = lesson.success_message
+        else:
+            view["correct"] = False
+            view["feedback"] = lesson.hint
+        lesson_view.refresh()
+
+    def select_training_card(card_id: str) -> None:
+        if view["correct"]:
+            return
+        view["selected_card"] = card_id
+        view["feedback"] = "次に、配置する戦線を選びます。"
+        lesson_view.refresh()
+
+    def select_training_lane(lane_id: str) -> None:
+        if view["correct"]:
+            return
+        view["selected_lane"] = lane_id
+        view["feedback"] = "最後に『命令を確定』を押します。"
+        lesson_view.refresh()
+
+    def confirm_training_order(lesson: BasicLesson) -> None:
+        if view["selected_card"] == "infantry_1" and view["selected_lane"] == "center":
+            view["correct"] = True
+            view["feedback"] = lesson.success_message
+        else:
+            view["correct"] = False
+            view["feedback"] = lesson.hint
+        lesson_view.refresh()
+
+    def reveal_training_order(lesson: BasicLesson) -> None:
+        view["revealed"] = True
+        view["correct"] = True
+        view["feedback"] = lesson.success_message
+        lesson_view.refresh()
+
+    def advance_basic() -> None:
+        index = int(view["index"])
+        if not view["correct"]:
+            return
+        state = ensure_player_state(app.storage.user)
+        if index == total_lessons - 1:
+            state = complete_basic_tutorial(state, final_stage=total_lessons)
+            store_player_state(app.storage.user, state)
+            view["completion"] = True
+        else:
+            state = update_basic_tutorial_stage(state, index + 1)
+            store_player_state(app.storage.user, state)
+            view["index"] = index + 1
+            reset_interaction()
+        lesson_view.refresh()
+        ui.run_javascript("window.scrollTo({top: 0, behavior: 'auto'})")
+
+    def render_choice_task(lesson: BasicLesson) -> None:
+        with ui.element("div").classes("tutorial-choice-grid"):
+            for choice, label in lesson.choices:
+                selected = view["answer"] == choice
+                state_class = " tutorial-choice--selected" if selected else ""
+                if selected and view["correct"]:
+                    state_class += " tutorial-choice--correct"
+                with ui.button(
+                    on_click=lambda value=choice: answer_choice(lesson, value)
+                ).props("no-caps unelevated").classes(f"tutorial-choice{state_class}"):
+                    ui.label(label).classes("font-bold")
+
+    def render_card_choice_task(lesson: BasicLesson) -> None:
+        with ui.element("div").classes("tutorial-card-choice-grid"):
+            for card_id, _ in lesson.choices:
+                card = get_card(card_id)
+                selected = view["answer"] == card_id
+                state_class = " tutorial-card-choice--selected" if selected else ""
+                if selected and view["correct"]:
+                    state_class += " tutorial-card-choice--correct"
+                option = ui.card().classes(f"tutorial-card-choice{state_class}")
+                option.on("click", lambda _, value=card_id: answer_choice(lesson, value))
+                with option:
+                    with ui.row().classes("items-center gap-3 no-wrap"):
+                        unit_symbol(card, "sm")
+                        with ui.column().classes("gap-0 min-w-0"):
+                            ui.label(card.name).classes("font-bold text-sm")
+                            ui.label(card.branch).classes("muted text-xs")
+                    ui.label(
+                        f"制圧 {card.control}　支援 {card.support}　偵察 {card.recon}　補給 {card.supply:+d}"
+                    ).classes("tutorial-card-numbers")
+
+    def render_deploy_task(lesson: BasicLesson) -> None:
+        selected_card = str(view["selected_card"])
+        selected_lane = str(view["selected_lane"])
+        with ui.element("div").classes("mini-order-steps"):
+            action_step(1, "カード", active=not selected_card, done=bool(selected_card))
+            action_step(2, "戦線", active=bool(selected_card) and not selected_lane, done=bool(selected_lane))
+            action_step(3, "確定", active=bool(selected_card and selected_lane), done=bool(view["correct"]))
+        ui.label("手札から1枚選ぶ").classes("font-bold mt-3")
+        with ui.element("div").classes("tutorial-mini-hand"):
+            for card_id in ("infantry_1", "recon_1"):
+                card = get_card(card_id)
+                selected_class = " tutorial-mini-card--selected" if selected_card == card_id else ""
+                option = ui.card().classes(f"tutorial-mini-card{selected_class}")
+                option.on("click", lambda _, value=card_id: select_training_card(value))
+                with option:
+                    unit_symbol(card, "sm")
+                    ui.label(card.name).classes("font-bold text-sm")
+                    ui.label(f"制圧 {card.control}").classes("muted text-xs")
+        ui.label("置く戦線を選ぶ").classes("font-bold mt-3")
+        with ui.element("div").classes("tutorial-lane-grid"):
+            for lane_id, lane_name in (("left", "左戦線"), ("center", "中央戦線"), ("right", "右戦線")):
+                selected_class = " tutorial-lane--selected" if selected_lane == lane_id else ""
+                with ui.button(
+                    lane_name,
+                    icon="place",
+                    on_click=lambda value=lane_id: select_training_lane(value),
+                ).props("no-caps unelevated").classes(f"tutorial-lane{selected_class}"):
+                    pass
+        with ui.row().classes("items-center gap-3 mt-3"):
+            confirm = primary_button(
+                "命令を確定",
+                icon="check",
+                on_click=lambda: confirm_training_order(lesson),
+            )
+            if not selected_card or not selected_lane or view["correct"]:
+                confirm.props("disable")
+            if selected_card and selected_lane:
+                card = get_card(selected_card)
+                lane_name = {"left": "左戦線", "center": "中央戦線", "right": "右戦線"}[selected_lane]
+                ui.label(f"予定：{card.name} → {lane_name}").classes("section-subtitle")
+
+    def render_reveal_task(lesson: BasicLesson) -> None:
+        with ui.element("div").classes("sealed-orders"):
+            with ui.element("div").classes("sealed-order"):
+                ui.icon("lock")
+                ui.label("あなたの命令").classes("font-bold")
+                ui.label("確定済み").classes("muted text-xs")
+            with ui.element("div").classes("sealed-order"):
+                ui.icon("lock")
+                ui.label("相手の命令").classes("font-bold")
+                ui.label("確定済み").classes("muted text-xs")
+        if not view["revealed"]:
+            primary_button(
+                "両方の配置先を公開",
+                icon="visibility",
+                on_click=lambda: reveal_training_order(lesson),
+            ).classes("mt-3")
+            return
+        with ui.element("div").classes("tutorial-lane-grid mt-3"):
+            for lane_name, content, owner in (
+                ("左戦線", "配備なし", ""),
+                ("中央戦線", "第1歩兵中隊", "あなた"),
+                ("右戦線", "未確認部隊", "相手"),
+            ):
+                with ui.element("div").classes("tutorial-lane tutorial-lane--revealed"):
+                    ui.label(lane_name).classes("font-bold")
+                    ui.label(content).classes("text-sm")
+                    if owner:
+                        chip(owner, "green" if owner == "あなた" else "red")
+
+    def render_basic_task(lesson: BasicLesson) -> None:
+        if lesson.kind == "card_choice":
+            render_card_choice_task(lesson)
+        elif lesson.kind == "deploy":
+            render_deploy_task(lesson)
+        elif lesson.kind == "reveal":
+            render_reveal_task(lesson)
+        else:
+            render_choice_task(lesson)
+
+    with page_shell(
+        "/tutorials", "BASIC COURSE", "はじめての作戦",
+        "一度に覚えるのは一つだけです。正しく操作すると、次の章へ進めます。",
+    ):
+        @ui.refreshable
+        def lesson_view() -> None:
+            if view["completion"]:
+                with ui.element("section").classes("tutorial-complete"):
+                    ui.icon("workspace_premium", size="54px").classes("green-text")
+                    ui.label("基礎9章を完了しました").classes("text-3xl font-bold")
+                    ui.label(
+                        "カードを1枚選び、戦線を選び、命令を確定するところから、"
+                        "支援・補給・偵察・勝敗判定までを一通り練習しました。"
+                    ).classes("page-subtitle text-center")
+                    with ui.row().classes("gap-3 justify-center mt-3"):
+                        primary_button("カード1枚を練習する", "/tutorials", "style")
+                        secondary_button("最初から復習", icon="replay", on_click=lambda: show_lesson(0))
+                        secondary_button("初心者演習へ", icon="play_arrow", on_click=lambda: begin_training())
+                return
+
+            index = int(view["index"])
+            lesson = BASIC_TUTORIAL_LESSONS[index]
+            completed, progress = tutorial_progress(index, total_lessons)
+            group_index = 0 if index < 4 else 1 if index < 7 else 2
+            with ui.element("div").classes("tutorial-progress-header"):
+                with ui.column().classes("gap-1 flex-1"):
+                    ui.label(f"第 {index + 1} / {total_lessons} 章").classes("page-eyebrow")
+                    ui.linear_progress(value=progress).props("rounded size=8px").classes("progress-track w-full")
+                chip(("入門", "戦線力", "実戦判断")[group_index], "green")
+
+            with ui.card().classes("tutorial-lesson-card"):
+                ui.label("今回覚える一言").classes("page-eyebrow")
+                ui.label(lesson.title).classes("text-2xl font-bold")
+                ui.label(lesson.plain_goal).classes("tutorial-plain-goal")
+                with ui.expansion("なぜそうなるの？", icon="help_outline").classes("details-expansion"):
+                    ui.label(lesson.explanation).classes("section-subtitle mt-2")
+                ui.separator().classes("bg-blue-grey-8 my-2")
+                ui.label("やってみる").classes("page-eyebrow")
+                ui.label(lesson.task).classes("font-bold text-lg")
+                render_basic_task(lesson)
+
+                if view["feedback"]:
+                    status_class = " tutorial-feedback--correct" if view["correct"] else " tutorial-feedback--hint"
+                    with ui.element("div").classes(f"tutorial-feedback{status_class}"):
+                        ui.icon("check_circle" if view["correct"] else "lightbulb")
+                        ui.label(str(view["feedback"])).classes("text-sm")
+
+                with ui.row().classes("w-full items-center justify-between gap-3 mt-2"):
+                    with ui.row().classes("gap-2"):
+                        if index > 0:
+                            secondary_button(
+                                "前の章",
+                                icon="arrow_back",
+                                on_click=lambda: show_lesson(index - 1),
+                            )
+                        secondary_button("訓練所へ戻る", "/tutorials", "close")
+                    if view["correct"]:
+                        primary_button(
+                            "基礎訓練を完了" if index == total_lessons - 1 else "次の章へ",
+                            icon="arrow_forward",
+                            on_click=advance_basic,
+                        )
+
+        lesson_view()
+
+
+@ui.page("/tutorials/card/{card_id}")
+def card_tutorial_page(card_id: str) -> None:
+    try:
+        tutorial = get_tutorial(card_id)
+        card = get_card(card_id)
+    except KeyError:
+        with page_shell(
+            "/tutorials", "CARD COURSE", "訓練が見つかりません",
+            "指定されたカードは、このバージョンにはありません。",
+        ):
+            with ui.card().classes("panel"):
+                ui.label("カードIDを確認してください。").classes("font-bold")
+                secondary_button("訓練所へ戻る", "/tutorials", "arrow_back")
+        return
+
+    initial_player = ensure_player_state(app.storage.user)
+    if card_id not in initial_player["collection"]["owned_cards"]:
+        with page_shell(
+            "/tutorials", "CARD COURSE", f"{card.name}の訓練",
+            "このカードを入手すると、使い方と公式デッキ報酬が開放されます。",
+        ):
+            with ui.card().classes("panel tutorial-locked-course"):
+                ui.icon("lock", size="48px").classes("muted")
+                unit_symbol(card, "lg")
+                ui.label("まだこのカードを持っていません").classes("text-xl font-bold")
+                ui.label("対戦を完了すると、未所持カードが1枚ずつ解放されます。").classes("section-subtitle")
+                secondary_button("所持カードの訓練を見る", "/tutorials", "arrow_back")
+        return
+
+    saved_tutorials = initial_player["tutorials"]
+    total_stages = len(tutorial.stages)
+    view: dict[str, object] = {
+        "index": min(int(saved_tutorials["card_stages"].get(card_id, 0)), total_stages - 1),
+        "answer": "",
+        "feedback": "",
+        "correct": False,
+        "reviewing": False,
+    }
+
+    def reset_card_interaction() -> None:
+        view.update(answer="", feedback="", correct=False)
+
+    def show_card_stage(index: int) -> None:
+        view["reviewing"] = True
+        view["index"] = max(0, min(total_stages - 1, index))
+        reset_card_interaction()
+        course_view.refresh()
+        ui.run_javascript("window.scrollTo({top: 0, behavior: 'auto'})")
+
+    def answer_card_check(choice: str) -> None:
+        stage = tutorial.stages[int(view["index"])]
+        view["answer"] = choice
+        if choice == stage.correct_choice:
+            view["correct"] = True
+            view["feedback"] = stage.success_message
+        else:
+            view["correct"] = False
+            view["feedback"] = "惜しいです。上の『注意』と、同じ戦線に必要な条件をもう一度確認してください。"
+        course_view.refresh()
+
+    def advance_card_course() -> None:
+        index = int(view["index"])
+        stage = tutorial.stages[index]
+        if stage.choices and not view["correct"]:
+            return
+        state = ensure_player_state(app.storage.user)
+        if index == total_stages - 1:
+            state = complete_card_tutorial(
+                state,
+                card_id,
+                official_deck_id=tutorial.reward_deck_id,
+                final_stage=total_stages,
+            )
+            store_player_state(app.storage.user, state)
+            view["reviewing"] = False
+        else:
+            state = update_card_tutorial_stage(state, card_id, index + 1)
+            store_player_state(app.storage.user, state)
+            view["index"] = index + 1
+            reset_card_interaction()
+        course_view.refresh()
+        ui.run_javascript("window.scrollTo({top: 0, behavior: 'auto'})")
+
+    with page_shell(
+        "/tutorials", "CARD COURSE", tutorial.title,
+        tutorial.intro,
+    ):
+        @ui.refreshable
+        def course_view() -> None:
+            player = ensure_player_state(app.storage.user)
+            complete = card_id in player["tutorials"]["completed_cards"]
+            if complete and not view["reviewing"]:
+                reward = get_official_deck(tutorial.reward_deck_id)
+                with ui.element("section").classes("tutorial-reward-header"):
+                    ui.icon("redeem", size="46px").classes("yellow-text")
+                    with ui.column().classes("gap-1 flex-1"):
+                        ui.label("カード訓練 完了").classes("page-eyebrow green-text")
+                        ui.label(f"報酬：{reward.name}").classes("text-2xl font-bold")
+                        ui.label(
+                            f"{card.name}を必ず含む公式おすすめデッキです。未所持カードは名前を表示し、選択時は空白にします。"
+                        ).classes("section-subtitle")
+                with ui.card().classes("panel"):
+                    official_deck_preview(reward, on_applied=course_view.refresh)
+                with ui.row().classes("gap-3"):
+                    secondary_button("このカードを復習", icon="replay", on_click=lambda: show_card_stage(0))
+                    secondary_button("ほかのカードを学ぶ", "/tutorials", "style")
+                    secondary_button("デッキを調整", "/deck", "view_carousel")
+                return
+
+            index = int(view["index"])
+            stage = tutorial.stages[index]
+            completed, progress = tutorial_progress(index, total_stages)
+            with ui.element("div").classes("tutorial-progress-header"):
+                with ui.column().classes("gap-1 flex-1"):
+                    ui.label(f"{card.name}　{index + 1} / {total_stages}章").classes("page-eyebrow")
+                    ui.linear_progress(value=progress).props("rounded size=8px").classes("progress-track w-full")
+                chip("復習中" if complete else f"{completed}章完了", "green" if complete else "")
+
+            with ui.element("div").classes("card-course-layout"):
+                with ui.card().classes("tutorial-lesson-card"):
+                    ui.label(stage.title).classes("text-2xl font-bold")
+                    ui.label(stage.summary).classes("tutorial-plain-goal")
+                    ui.label(stage.explanation).classes("section-subtitle tutorial-copy")
+                    with ui.element("div").classes("tutorial-practice"):
+                        ui.label("この章で確認すること").classes("blue-text text-xs font-bold")
+                        ui.label(stage.practice).classes("text-sm")
+
+                    if stage.choices:
+                        ui.separator().classes("bg-blue-grey-8 my-2")
+                        ui.label(stage.question).classes("font-bold text-lg")
+                        with ui.element("div").classes("tutorial-choice-grid"):
+                            for choice in stage.choices:
+                                selected = view["answer"] == choice
+                                state_class = " tutorial-choice--selected" if selected else ""
+                                if selected and view["correct"]:
+                                    state_class += " tutorial-choice--correct"
+                                with ui.button(
+                                    choice,
+                                    on_click=lambda value=choice: answer_card_check(value),
+                                ).props("no-caps unelevated").classes(f"tutorial-choice{state_class}"):
+                                    pass
+
+                    if view["feedback"]:
+                        status_class = " tutorial-feedback--correct" if view["correct"] else " tutorial-feedback--hint"
+                        with ui.element("div").classes(f"tutorial-feedback{status_class}"):
+                            ui.icon("check_circle" if view["correct"] else "lightbulb")
+                            ui.label(str(view["feedback"])).classes("text-sm")
+
+                    with ui.row().classes("w-full items-center justify-between gap-3 mt-3"):
+                        with ui.row().classes("gap-2"):
+                            if index > 0:
+                                secondary_button(
+                                    "前の章", icon="arrow_back",
+                                    on_click=lambda: show_card_stage(index - 1),
+                                )
+                            secondary_button("訓練所へ", "/tutorials", "close")
+                        if not stage.choices or view["correct"]:
+                            primary_button(
+                                "訓練を完了してデッキを受け取る" if index == total_stages - 1 else "理解した・次の章へ",
+                                icon="arrow_forward",
+                                on_click=advance_card_course,
+                            )
+
+                with ui.card().classes("panel card-course-reference"):
+                    with ui.row().classes("items-start gap-4 no-wrap"):
+                        unit_symbol(card, "lg")
+                        with ui.column().classes("gap-1 min-w-0"):
+                            chip(card.branch)
+                            ui.label(card.name).classes("text-xl font-bold")
+                            ui.label(card.tagline).classes("section-subtitle")
+                    ui.separator().classes("bg-blue-grey-8 my-2")
+                    with ui.element("div").classes("card-course-stat-grid"):
+                        for label, value in (
+                            ("制圧", card.control),
+                            ("支援", card.support),
+                            ("偵察", card.recon),
+                            ("補給", f"{card.supply:+d}"),
+                        ):
+                            with ui.element("div").classes("card-course-stat"):
+                                ui.label(label).classes("muted text-xs")
+                                ui.label(str(value)).classes("mono text-xl font-bold")
+                    ui.label("数値はこの4つだけ見れば進めます。").classes("muted text-xs")
+
+        course_view()
 
 
 @ui.page("/learn")
@@ -516,14 +1276,16 @@ def learn_page() -> None:
             for number, title, description in (
                 ("1", "カードを選ぶ", "最初は『歩兵』か『偵察』を選べば大丈夫です。"),
                 ("2", "場所を選ぶ", "迷ったら中央へ置きます。"),
-                ("3", "命令を決定", "相手の選択と同時に公開されます。"),
+                ("3", "命令を決定", "配置先は同時に決まり、相手カードは偵察まで未確認です。"),
             ):
                 with ui.card().classes("step-card"):
                     ui.label(number).classes("step-number")
                     ui.label(title).classes("font-bold text-lg")
                     ui.label(description).classes("section-subtitle mt-2")
 
-        primary_button("実際に1枚置いてみる", icon="play_arrow", on_click=lambda: begin_training())
+        with ui.row().classes("gap-3"):
+            primary_button("段階チュートリアルで試す", "/tutorials/basic", "school")
+            secondary_button("訓練所の一覧", "/tutorials", "view_module")
 
         with ui.expansion("6つのカードの仕事を見る", icon="extension").classes("details-expansion"):
             with ui.element("div").classes("role-grid mt-3"):
@@ -576,7 +1338,8 @@ def advanced_learn_page() -> None:
                     ui.label(explanation).classes("section-subtitle px-4 pb-4")
 
         with ui.row().classes("gap-3"):
-            primary_button("演習を始める", icon="play_arrow", on_click=lambda: begin_training())
+            primary_button("段階チュートリアルを始める", "/tutorials/basic", "school")
+            secondary_button("演習を始める", icon="play_arrow", on_click=lambda: begin_training())
             secondary_button("カード図鑑を見る", "/cards", "style")
 
 
@@ -788,7 +1551,14 @@ def deck_page() -> None:
         "/deck", "FORCE BUILDER", "デッキ編成",
         "役割の違うカードを組み合わせて、自分の部隊を作ります。実際の軍隊編制ではなくゲーム用の構成です。",
     ):
-        ensure_player_state(app.storage.user)
+        initial_player = ensure_player_state(app.storage.user)
+        unlocked_deck_count = len(initial_player["tutorials"]["unlocked_official_decks"])
+        with ui.element("div").classes("beginner-callout"):
+            with ui.row().classes("w-full items-center justify-between gap-4"):
+                with ui.column().classes("gap-1"):
+                    ui.label(f"公式おすすめデッキ：{unlocked_deck_count}個 解放済み").classes("font-bold")
+                    ui.label("カード訓練の報酬デッキは、未所持の枠を空白にしてここへセットできます。").classes("text-sm")
+                secondary_button("公式デッキを見る", "/tutorials", "redeem")
 
         def update_deck(new_deck: list[str], message: str | None = None) -> None:
             state = ensure_player_state(app.storage.user)
@@ -932,6 +1702,14 @@ def lobby_page() -> None:
         "/lobby", "PLAY", "何をするか一つ選ぶ",
         "初めてなら演習がおすすめです。勝敗や時間を気にせず操作を試せます。",
     ):
+        if not ensure_player_state(app.storage.user)["tutorials"]["basic_completed"]:
+            with ui.element("div").classes("beginner-callout beginner-callout--yellow"):
+                with ui.row().classes("w-full items-center justify-between gap-4"):
+                    with ui.column().classes("gap-1"):
+                        ui.label("操作の前に、基礎を一つずつ試せます").classes("font-bold")
+                        ui.label("対戦はいつでも始められますが、9章の段階チュートリアルを先に行うと画面が分かりやすくなります。").classes("text-sm")
+                    secondary_button("基礎チュートリアル", "/tutorials/basic", "school")
+
         def choose_mode(mode: str) -> None:
             if mode == "training":
                 begin_training()
@@ -1739,7 +2517,7 @@ def battle_page() -> None:
     with ui.dialog() as confirm_dialog, ui.card().classes("dialog-card"):
         ui.label("この命令でよいですか？").classes("text-xl font-bold")
         confirm_text = ui.label().classes("section-subtitle")
-        ui.label("確定すると相手AIの命令と同時に公開されます。").classes("muted text-xs")
+        ui.label("確定すると両者の配置先が同時に決まり、相手カードは未確認で置かれます。").classes("muted text-xs")
         with ui.row().classes("gap-2 mt-3"):
             primary_button("確定して解決", icon="check", on_click=close_and_execute)
             secondary_button("選び直す", icon="close", on_click=confirm_dialog.close)
@@ -2119,7 +2897,7 @@ def settings_page() -> None:
                     setting_switch("explain_military_terms", "軍事用語の説明", "専門用語の横に、普段の言葉で意味を表示します。")
                     setting_switch("recommended_actions", "おすすめ行動", "選べる行動に迷ったとき、候補を1つ表示します。")
                     setting_switch("slow_resolution", "結果を項目別に表示", "命令公開・索敵・補給・戦線判定を番号付きで表示します。")
-                    secondary_button("チュートリアルをもう一度見る", "/learn", "school").classes("mt-3")
+                    secondary_button("チュートリアルをもう一度見る", "/tutorials", "school").classes("mt-3")
                 with ui.card().classes("panel"):
                     section_heading("対戦")
                     setting_switch("confirm_orders", "命令確定前に確認する", "誤操作を防ぐため、確定内容を文章で表示します。")
