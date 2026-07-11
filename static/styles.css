@@ -1216,6 +1216,169 @@ a:focus-visible {
   border-radius: 10px !important;
 }
 
+/* Navigation and account ------------------------------------------------ */
+
+.mobile-bottom-nav {
+  display: none !important;
+}
+
+.drawer-account {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 11px;
+  align-items: center;
+  width: 100%;
+  margin-top: 22px;
+  padding: 13px;
+  background: #0d2133;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.drawer-account__icon {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  overflow: hidden;
+  color: #0b5cad;
+  background: #f7faff;
+  border: 2px solid var(--blue);
+  border-radius: 5px;
+  font-family: Consolas, "Roboto Mono", monospace;
+  font-size: 14px;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.account-hero {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 18px;
+  align-items: center;
+  width: 100%;
+  padding: clamp(20px, 3vw, 30px);
+  background: #102b44;
+  border: 1px solid #3975a7;
+  border-radius: 12px;
+}
+
+.account-avatar {
+  display: grid;
+  place-items: center;
+  width: 86px;
+  height: 86px;
+  overflow: hidden;
+  color: #0b5cad;
+  background: #f7faff;
+  border: 3px solid var(--blue);
+  border-radius: 9px;
+  font-family: Consolas, "Roboto Mono", monospace;
+  font-size: 25px;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.account-icon-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(126px, 1fr));
+  gap: 9px;
+  width: 100%;
+  max-height: 430px;
+  overflow-y: auto;
+  padding: 2px 3px 8px;
+}
+
+.account-icon-option {
+  width: 100%;
+  min-height: 104px;
+  padding: 11px !important;
+  color: var(--text) !important;
+  background: #102638 !important;
+  border: 1px solid #3a566e !important;
+  border-radius: 8px !important;
+}
+
+.account-icon-option .q-btn__content {
+  flex-direction: column;
+  gap: 7px;
+  width: 100%;
+}
+
+.account-icon-option:hover,
+.account-icon-option--active {
+  background: #174065 !important;
+  border-color: var(--blue) !important;
+}
+
+.account-icon-option--active {
+  box-shadow: inset 0 -3px 0 var(--blue);
+}
+
+.account-icon-option__token {
+  display: grid;
+  place-items: center;
+  width: 66px;
+  height: 44px;
+  overflow: hidden;
+  color: #0b5cad;
+  background: #f7faff;
+  border: 2px solid var(--blue);
+  border-radius: 3px;
+  font-family: Consolas, "Roboto Mono", monospace;
+  font-size: 17px;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.account-icon-option__name {
+  width: 100%;
+  overflow: hidden;
+  color: #d9e6f1;
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-auth-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  width: 100%;
+  align-items: start;
+}
+
+.account-auth-card {
+  min-height: 100%;
+}
+
+.battle-account {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.battle-account__icon {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 34px;
+  flex: 0 0 42px;
+  overflow: hidden;
+  color: #0b5cad;
+  background: #f7faff;
+  border: 2px solid var(--blue);
+  border-radius: 3px;
+  font-family: Consolas, "Roboto Mono", monospace;
+  font-size: 12px;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
 /* User preferences -------------------------------------------------------
    These selectors deliberately live near the end of the stylesheet so a
    saved accessibility preference wins over the default presentation. */
@@ -1594,6 +1757,7 @@ body.cg-patterns-off .hero-main::after {
 
 .tutorial-lesson-card {
   width: 100%;
+  min-width: 0;
   max-width: 1060px;
   padding: clamp(20px, 4vw, 34px);
   color: var(--text) !important;
@@ -1834,7 +1998,12 @@ body.cg-patterns-off .hero-main::after {
   grid-template-columns: minmax(0, 1fr) 330px;
   gap: 16px;
   width: 100%;
+  min-width: 0;
   align-items: start;
+}
+
+.card-course-layout > * {
+  min-width: 0;
 }
 
 .card-course-reference {
@@ -1861,13 +2030,186 @@ body.cg-patterns-off .hero-main::after {
   white-space: pre-line;
 }
 
+/* Full simulation mode -------------------------------------------------- */
+
+.simulation-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(280px, 0.55fr);
+  gap: 22px;
+  align-items: center;
+  width: 100%;
+  padding: clamp(22px, 4vw, 38px);
+  background: linear-gradient(135deg, #102b44 0%, #0d2234 100%);
+  border: 1px solid #3975a7;
+  border-radius: 12px;
+}
+
+.simulation-status-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  width: 100%;
+}
+
+.simulation-status {
+  min-height: 94px;
+  padding: 14px;
+  background: #102638;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.simulation-board {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 100%;
+  min-width: 0;
+}
+
+.simulation-theater-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  width: 100%;
+}
+
+.simulation-theater {
+  min-height: 250px;
+  padding: 16px;
+  color: var(--text) !important;
+  background: #102336 !important;
+  border: 1px solid #34506b !important;
+  border-radius: 9px !important;
+  box-shadow: none !important;
+  transition: border-color 140ms ease, background 140ms ease, box-shadow 140ms ease;
+}
+
+.simulation-theater:hover {
+  background: #132a40 !important;
+  border-color: #4d779c !important;
+}
+
+.simulation-theater--selected {
+  background: #15334e !important;
+  border: 2px solid var(--blue) !important;
+  box-shadow: 0 0 0 3px rgba(96, 175, 255, 0.13) !important;
+}
+
+.simulation-hand {
+  width: 100%;
+  padding: 17px;
+  background: var(--panel) !important;
+  border: 1px solid var(--line) !important;
+  border-radius: 10px !important;
+}
+
+.simulation-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 11px;
+  width: 100%;
+}
+
+.simulation-card {
+  width: 100%;
+  min-height: 178px;
+  padding: 14px !important;
+  color: var(--text) !important;
+  background: #13283a !important;
+  border: 1px solid #3a566e !important;
+  border-radius: 8px !important;
+  box-shadow: none !important;
+  white-space: normal !important;
+}
+
+.simulation-card .q-btn__content {
+  align-items: stretch;
+  flex-direction: column;
+  gap: 7px;
+  width: 100%;
+  text-align: left;
+}
+
+.simulation-card:hover,
+.simulation-card--selected {
+  background: #174065 !important;
+  border-color: var(--blue) !important;
+}
+
+.simulation-card--selected {
+  border-width: 2px !important;
+  box-shadow: inset 0 -3px 0 var(--blue) !important;
+}
+
+.simulation-card__symbol {
+  display: grid;
+  place-items: center;
+  width: 82px;
+  height: 54px;
+  margin: 2px auto 6px;
+  overflow: hidden;
+  color: #0b5cad;
+  background: #f7faff;
+  border: 2px solid var(--blue);
+  border-radius: 3px;
+  font-family: Consolas, "Roboto Mono", monospace;
+  font-size: 20px;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.simulation-card__stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+  width: 100%;
+}
+
+.simulation-card__stat {
+  min-width: 0;
+  padding: 6px 3px;
+  text-align: center;
+  background: #0c1d2b;
+  border: 1px solid #2e465b;
+  border-radius: 5px;
+  font-size: 10px;
+}
+
+.simulation-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  padding: 14px;
+  background: #0d1f30;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+}
+
+.simulation-deck-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 12px;
+  width: 100%;
+}
+
+.simulation-filter-bar {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(170px, 1fr));
+  gap: 11px;
+  width: 100%;
+}
+
 @media (max-width: 1180px) {
   .hero,
   .content-grid,
   .deck-layout,
   .battle-layout,
   .tutorial-hero,
-  .card-course-layout {
+  .card-course-layout,
+  .simulation-hero {
     grid-template-columns: 1fr;
   }
 
@@ -1880,6 +2222,10 @@ body.cg-patterns-off .hero-main::after {
   }
 
   .metric-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .simulation-status-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -1908,14 +2254,76 @@ body.cg-patterns-off .hero-main::after {
 }
 
 @media (max-width: 760px) {
+  :root {
+    --mobile-nav-height: 68px;
+  }
+
   .cg-header {
     min-height: 58px;
     padding: 0 10px;
   }
 
   .cg-page {
-    padding: 22px 14px 42px;
+    min-height: calc(100dvh - 58px);
+    overflow-x: hidden;
+    padding: 20px 12px calc(var(--mobile-nav-height) + 34px + env(safe-area-inset-bottom));
     gap: 17px !important;
+  }
+
+  .cg-header .status-chip {
+    display: none;
+  }
+
+  .mobile-bottom-nav {
+    position: fixed;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 2500;
+    display: grid !important;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    min-height: calc(var(--mobile-nav-height) + env(safe-area-inset-bottom));
+    padding: 4px 4px env(safe-area-inset-bottom);
+    background: rgba(8, 23, 37, 0.97);
+    border-top: 1px solid #38536c;
+    box-shadow: 0 -8px 22px rgba(0, 0, 0, 0.28);
+    backdrop-filter: blur(12px);
+  }
+
+  .mobile-bottom-nav__button {
+    position: relative;
+    min-width: 0;
+    min-height: 60px;
+    padding: 5px 2px !important;
+    color: #91a5b8 !important;
+    border-radius: 7px !important;
+  }
+
+  .mobile-bottom-nav__button .q-btn__content {
+    flex-direction: column;
+    gap: 2px;
+    width: 100%;
+    line-height: 1;
+  }
+
+  .mobile-bottom-nav__button .q-icon {
+    font-size: 23px;
+  }
+
+  .mobile-bottom-nav__button--active {
+    color: #ffffff !important;
+    background: #153456 !important;
+    box-shadow: inset 0 3px 0 var(--blue) !important;
+  }
+
+  .mobile-bottom-nav__label {
+    max-width: 100%;
+    overflow: hidden;
+    font-size: 10px;
+    font-weight: 750;
+    line-height: 1.2;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .header-subtitle,
@@ -1941,6 +2349,19 @@ body.cg-patterns-off .hero-main::after {
     font-size: 14px;
   }
 
+  .page-title {
+    font-size: clamp(24px, 8vw, 31px);
+  }
+
+  .page-subtitle {
+    font-size: 14px;
+    line-height: 1.65;
+  }
+
+  .panel {
+    padding: 16px;
+  }
+
   .metric-grid,
   .three-grid,
   .role-grid,
@@ -1948,8 +2369,19 @@ body.cg-patterns-off .hero-main::after {
   .lane-grid,
   .beginner-card-grid,
   .symbol-mini-grid,
-  .official-deck-grid {
+  .locked-tutorial-grid {
     grid-template-columns: 1fr;
+  }
+
+  .filter-bar,
+  .simulation-filter-bar,
+  .account-auth-grid,
+  .simulation-deck-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .official-deck-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .start-here {
@@ -1969,7 +2401,6 @@ body.cg-patterns-off .hero-main::after {
   }
 
   .tutorial-mini-hand,
-  .tutorial-lane-grid,
   .sealed-orders,
   .tutorial-card-choice-grid,
   .tutorial-choice-grid {
@@ -1981,12 +2412,94 @@ body.cg-patterns-off .hero-main::after {
   }
 
   .battle-status {
-    grid-template-columns: 1fr;
-    text-align: left;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    gap: 6px;
+    padding: 11px 9px;
+    text-align: initial;
+  }
+
+  .battle-status .font-bold {
+    overflow: hidden;
+    font-size: 11px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .battle-status .text-xl {
+    font-size: 15px;
+  }
+
+  .battle-status .text-xs {
+    font-size: 9px;
+    line-height: 1.35;
   }
 
   .battle-lane {
     min-height: 330px;
+  }
+
+  .battle-board-column {
+    min-width: 0;
+  }
+
+  .battle-board-column .lane-grid {
+    display: flex;
+    width: calc(100% + 24px);
+    overflow-x: auto;
+    gap: 10px;
+    margin-right: -12px;
+    margin-left: -12px;
+    padding: 2px 12px 14px;
+    scroll-padding-inline: 12px;
+    scroll-snap-type: x mandatory;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .battle-board-column .battle-lane {
+    flex: 0 0 clamp(280px, 82vw, 380px);
+    scroll-snap-align: center;
+    scroll-snap-stop: always;
+  }
+
+  .battle-hand-panel {
+    padding: 14px;
+  }
+
+  .hand-strip {
+    scroll-snap-type: x mandatory;
+  }
+
+  .hand-card {
+    min-width: 146px;
+    max-width: 146px;
+    scroll-snap-stop: always;
+  }
+
+  .battle-focus .action-steps {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    width: 100%;
+  }
+
+  .battle-focus .action-step {
+    min-height: 54px;
+    padding: 7px;
+  }
+
+  .battle-focus .action-step__label {
+    font-size: 11px;
+  }
+
+  .battle-account {
+    gap: 5px;
+  }
+
+  .battle-account__icon {
+    width: 34px;
+    height: 28px;
+    flex-basis: 34px;
+    font-size: 10px;
   }
 
   .unit-card-grid {
@@ -2005,6 +2518,188 @@ body.cg-patterns-off .hero-main::after {
 
   .profile-hero > :last-child {
     grid-column: 1 / -1;
+  }
+
+  .drawer-account {
+    margin-top: 16px;
+  }
+
+  .account-hero {
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 13px;
+    padding: 17px;
+  }
+
+  .account-hero > :last-child {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
+
+  .account-avatar {
+    width: 68px;
+    height: 68px;
+    font-size: 20px;
+  }
+
+  .account-icon-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    max-height: none;
+    gap: 8px;
+  }
+
+  .account-icon-option {
+    min-height: 98px;
+    padding: 9px !important;
+  }
+
+  .account-auth-card {
+    min-height: auto;
+  }
+
+  .filter-control .q-field__control {
+    min-height: 52px;
+  }
+
+  .primary-button,
+  .secondary-button,
+  .danger-button,
+  .card-action,
+  .tutorial-choice {
+    min-height: 48px;
+    touch-action: manipulation;
+  }
+
+  .result-banner .q-btn {
+    flex: 1 1 100%;
+    min-height: 48px;
+  }
+
+  .tutorial-progress-header,
+  .tutorial-reward-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .tutorial-lesson-card {
+    padding: 18px;
+  }
+
+  .tutorial-lane-grid {
+    display: flex;
+    width: calc(100% + 24px);
+    overflow-x: auto;
+    gap: 9px;
+    margin-right: -12px;
+    margin-left: -12px;
+    padding: 2px 12px 12px;
+    scroll-padding-inline: 12px;
+    scroll-snap-type: x mandatory;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .tutorial-lane {
+    flex: 0 0 clamp(238px, 76vw, 320px);
+    min-height: 104px;
+    scroll-snap-align: center;
+    scroll-snap-stop: always;
+  }
+
+  .tutorial-complete {
+    min-height: 320px;
+    padding: 28px 18px;
+  }
+
+  .simulation-hero {
+    padding: 20px 17px;
+  }
+
+  .simulation-status-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .simulation-status {
+    min-height: 82px;
+    padding: 11px;
+  }
+
+  .simulation-theater-grid {
+    display: flex;
+    width: calc(100% + 24px);
+    overflow-x: auto;
+    gap: 10px;
+    margin-right: -12px;
+    margin-left: -12px;
+    padding: 3px 12px 14px;
+    scroll-padding-inline: 12px;
+    scroll-snap-type: x mandatory;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .simulation-theater {
+    flex: 0 0 clamp(280px, 84vw, 390px);
+    min-height: 235px;
+    scroll-snap-align: center;
+    scroll-snap-stop: always;
+  }
+
+  .simulation-hand {
+    padding: 14px;
+  }
+
+  .simulation-card-grid {
+    display: flex;
+    overflow-x: auto;
+    gap: 10px;
+    padding: 2px 1px 12px;
+    scroll-snap-type: x mandatory;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .simulation-card {
+    flex: 0 0 clamp(220px, 72vw, 286px);
+    min-height: 172px;
+    scroll-snap-align: start;
+    scroll-snap-stop: always;
+  }
+
+  .simulation-controls {
+    align-items: stretch;
+    flex-direction: column;
+    padding: 12px;
+  }
+
+  .simulation-controls > .q-btn,
+  .simulation-controls > .q-field {
+    width: 100%;
+    min-height: 48px;
+  }
+
+  .battle-board-column .lane-grid,
+  .tutorial-lane-grid,
+  .simulation-theater-grid,
+  .simulation-card-grid,
+  .hand-strip {
+    scrollbar-width: thin;
+    scrollbar-color: #486886 transparent;
+  }
+}
+
+@media (max-width: 420px) {
+  .cg-header .brand-mark {
+    display: none;
+  }
+
+  .official-deck-slot {
+    min-height: 122px;
+    padding-right: 6px;
+    padding-left: 6px;
+  }
+
+  .official-deck-slot__name {
+    font-size: 11px;
   }
 }
 

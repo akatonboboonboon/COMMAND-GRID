@@ -1,9 +1,17 @@
 import json
+import tempfile
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
+from unittest.mock import patch
 
-from game_data import STARTER_DECK
+from account_store import AccountStore
+from advanced_game_data import ADVANCED_CARDS, ADVANCED_STARTER_DECK
+from game_data import CARDS, STARTER_DECK
 from player_state import (
+    ACCOUNT_SESSION_STORAGE_KEY,
+    ACCOUNT_SYNC_ERROR_STORAGE_KEY,
+    ACCOUNT_USERNAME_STORAGE_KEY,
     MAX_BATTLE_HISTORY,
     PLAYER_STATE_KEY,
     PREFERENCE_DEFAULTS,
@@ -16,6 +24,7 @@ from player_state import (
     store_player_state,
     unlock_collection,
     update_deck,
+    update_advanced_deck,
     update_basic_tutorial_stage,
     update_card_tutorial_stage,
     update_formation,
@@ -52,6 +61,87 @@ class PlayerStateTests(unittest.TestCase):
             },
         )
         json.dumps(second)
+
+    def test_account_sync_requires_a_valid_matching_session(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = AccountStore(sqlite_path=Path(directory) / "accounts.sqlite3")
+            original = default_player_state()
+            account = store.register("sync_user", "password123", "同期ユーザー", original)
+            token = store.create_session(account.username)
+            storage: dict[str, object] = {
+                ACCOUNT_USERNAME_STORAGE_KEY: account.username,
+                ACCOUNT_SESSION_STORAGE_KEY: token,
+            }
+
+            with patch("account_store.get_default_account_store", return_value=store):
+                changed = update_profile(original, tagline="データベースへ同期")
+                store_player_state(storage, changed)
+                self.assertEqual(
+                    store.load_player_state(account.username)["profile"]["tagline"],
+                    "データベースへ同期",
+                )
+                self.assertNotIn(ACCOUNT_SYNC_ERROR_STORAGE_KEY, storage)
+
+                storage[ACCOUNT_SESSION_STORAGE_KEY] = "invalid-session"
+                rejected = update_profile(changed, tagline="保存してはいけない")
+                store_player_state(storage, rejected)
+                self.assertIn(ACCOUNT_SYNC_ERROR_STORAGE_KEY, storage)
+                self.assertEqual(
+                    store.load_player_state(account.username)["profile"]["tagline"],
+                    "データベースへ同期",
+                )
+            store.close()
+
+    def test_advanced_simulation_unlocks_only_after_all_core_cards(self) -> None:
+        state = default_player_state()
+        self.assertFalse(state["progression"]["simulation_unlocked"])
+        self.assertEqual(
+            state["progression"]["advanced_deck"], list(ADVANCED_STARTER_DECK)
+        )
+        with self.assertRaises(ValueError):
+            update_mode(state, "simulation")
+
+        locked_ids = [
+            card.id for card in CARDS
+            if card.id not in state["collection"]["owned_cards"]
+        ]
+        unlocked = unlock_collection(state, cards=locked_ids)
+        self.assertTrue(unlocked["progression"]["simulation_unlocked"])
+        self.assertFalse(unlocked["preferences"]["beginner_mode"])
+        selected = update_mode(unlocked, "本格シミュレーション")
+        self.assertEqual(selected["selected_mode"], "simulation")
+        with self.assertRaises(ValueError):
+            update_preference(selected, "beginner_mode", True)
+
+    def test_advanced_deck_validation_and_corrupt_progress_repair(self) -> None:
+        all_cards_state = unlock_collection(
+            default_player_state(), cards=[card.id for card in CARDS]
+        )
+        chosen = [card.id for card in ADVANCED_CARDS[:12]]
+        updated = update_advanced_deck(all_cards_state, chosen)
+        self.assertEqual(updated["progression"]["advanced_deck"], chosen)
+
+        for bad_deck in (
+            chosen[:11],
+            [*chosen, chosen[0]],
+            [*chosen[:11], "missing"],
+        ):
+            with self.subTest(deck=bad_deck):
+                with self.assertRaises(ValueError):
+                    update_advanced_deck(all_cards_state, bad_deck)
+
+        repaired = normalize_player_state(
+            {
+                "progression": {
+                    "simulation_unlocked": True,
+                    "advanced_deck": ["missing"],
+                }
+            }
+        )
+        self.assertFalse(repaired["progression"]["simulation_unlocked"])
+        self.assertEqual(
+            repaired["progression"]["advanced_deck"], list(ADVANCED_STARTER_DECK)
+        )
 
     def test_tutorial_progress_normalizes_corrupt_and_legacy_values(self) -> None:
         state = normalize_player_state(

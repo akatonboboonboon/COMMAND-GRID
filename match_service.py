@@ -52,7 +52,7 @@ def start_match(
     selected deck, mode and formation from :mod:`player_state`; later settings
     changes therefore cannot alter a battle already in progress.
 
-    The selected deck must satisfy the engine's normal six-card minimum.  The
+    The selected deck must satisfy the engine's normal nine-card minimum.  The
     engine's :class:`~game_engine.RuleViolation` is intentionally allowed to
     propagate so the UI can show its stable error code and friendly message.
     """
@@ -292,16 +292,9 @@ def _record_completed_result_once(
 
     points = result.mission_points
     player = ensure_player_state(storage)
-    owned_cards = set(player["collection"]["owned_cards"])
-    unlocked_symbols = set(player["collection"]["unlocked_symbols"])
-    reward_cards = [
-        card.id for card in CARDS if card.id not in owned_cards
-    ][:1]
-    reward_symbols = [
-        symbol.id
-        for symbol in SYMBOL_CATALOG
-        if symbol.id not in unlocked_symbols
-    ][:12]
+    rewards = collection_rewards_for_outcome(player, player_result)
+    reward_cards = rewards["cards"]
+    reward_symbols = rewards["symbols"]
     updated = record_result(
         player,
         player_result,
@@ -326,6 +319,38 @@ def _record_completed_result_once(
     envelope["result_recorded"] = True
 
 
+def collection_rewards_for_outcome(
+    player: Mapping[str, Any], outcome: str
+) -> dict[str, list[str]]:
+    """Select deterministic collection rewards for one completed match.
+
+    A win grants the next unowned card and up to twelve symbols. A draw grants
+    three symbols, while a loss grants one small symbol reward. Exhausted card
+    or symbol catalogs naturally produce empty lists. Keeping this policy in a
+    shared pure function makes local and online rewards identical.
+    """
+
+    symbol_limits = {"win": 12, "draw": 3, "loss": 1}
+    if outcome not in symbol_limits:
+        raise ValueError(f"unknown match outcome: {outcome}")
+    collection = player.get("collection")
+    if not isinstance(collection, Mapping):
+        raise ValueError("player collection is missing")
+    owned_cards = set(collection.get("owned_cards", []))
+    unlocked_symbols = set(collection.get("unlocked_symbols", []))
+    reward_cards = (
+        [card.id for card in CARDS if card.id not in owned_cards][:1]
+        if outcome == "win"
+        else []
+    )
+    reward_symbols = [
+        symbol.id
+        for symbol in SYMBOL_CATALOG
+        if symbol.id not in unlocked_symbols
+    ][: symbol_limits[outcome]]
+    return {"cards": reward_cards, "symbols": reward_symbols}
+
+
 def _recorded_ids(raw: object) -> list[str]:
     if not isinstance(raw, list):
         return []
@@ -339,6 +364,7 @@ __all__ = [
     "MATCH_SCHEMA_VERSION",
     "RECORDED_MATCH_IDS_KEY",
     "abandon_match",
+    "collection_rewards_for_outcome",
     "get_match_context",
     "load_match",
     "play_player_round",

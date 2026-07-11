@@ -16,18 +16,24 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+from advanced_game_data import ADVANCED_CARD_INDEX, ADVANCED_STARTER_DECK
 from game_data import CARDS, CARD_INDEX, STARTER_DECK
 from symbol_catalog import CARD_SYMBOL_IDS, SYMBOL_INDEX
 
 
 PLAYER_STATE_KEY = "player_state"
-SCHEMA_VERSION = 2
+ACCOUNT_USERNAME_STORAGE_KEY = "account_username"
+ACCOUNT_SESSION_STORAGE_KEY = "account_session_token"
+ACCOUNT_SYNC_ERROR_STORAGE_KEY = "account_sync_error"
+SCHEMA_VERSION = 3
 MAX_DECK_SIZE = 12
+MAX_ADVANCED_DECK_SIZE = 24
+MIN_ADVANCED_DECK_SIZE = 12
 MAX_BATTLE_HISTORY = 50
 DEFAULT_DISPLAY_NAME = "COMMANDER"
 DEFAULT_TAGLINE = "偵察から覚えています"
 
-VALID_MODES = frozenset({"training", "casual", "ranked", "friend"})
+VALID_MODES = frozenset({"training", "casual", "ranked", "friend", "simulation"})
 VALID_FORMATIONS = frozenset({"native", "battalion", "brigade", "division"})
 VALID_RESULTS = frozenset({"win", "loss", "draw"})
 
@@ -77,6 +83,10 @@ _MODE_ALIASES = {
     "ランク対戦": "ranked",
     "フレンド": "friend",
     "フレンド対戦": "friend",
+    "simulation": "simulation",
+    "advanced": "simulation",
+    "上級": "simulation",
+    "本格シミュレーション": "simulation",
 }
 _FORMATION_ALIASES = {
     "default": "native",
@@ -135,6 +145,9 @@ _LEGACY_ROOT_KEYS = frozenset(
         "card_tutorial_stages",
         "completed_tutorial_cards",
         "unlocked_official_decks",
+        "progression",
+        "simulation_unlocked",
+        "advanced_deck",
         *PREFERENCE_DEFAULTS,
         *_PREFERENCE_ALIASES,
     }
@@ -162,6 +175,10 @@ def default_player_state() -> dict[str, Any]:
         "deck": list(STARTER_DECK),
         "selected_formation": "native",
         "selected_mode": "training",
+        "progression": {
+            "simulation_unlocked": False,
+            "advanced_deck": list(ADVANCED_STARTER_DECK),
+        },
         "tutorials": {
             "basic_stage": 0,
             "basic_completed": False,
@@ -199,6 +216,13 @@ def normalize_player_state(raw: object) -> dict[str, Any]:
     state["selected_mode"] = _normalize_mode(
         source.get("selected_mode", source.get("mode"))
     )
+    state["progression"] = _normalize_progression(
+        source, collection["owned_cards"]
+    )
+    if state["progression"]["simulation_unlocked"]:
+        state["preferences"]["beginner_mode"] = False
+    elif state["selected_mode"] == "simulation":
+        state["selected_mode"] = "training"
     state["tutorials"] = _normalize_tutorials(source, collection["owned_cards"])
 
     history_source = source.get("battle_history", source.get("history"))
@@ -233,7 +257,40 @@ def store_player_state(
 
     normalized = normalize_player_state(state)
     storage[PLAYER_STATE_KEY] = normalized
+    _persist_account_state(storage, normalized)
     return deepcopy(normalized)
+
+
+def _persist_account_state(
+    storage: MutableMapping[str, Any], state: Mapping[str, Any]
+) -> None:
+    """Best-effort account sync without making gameplay unavailable on DB errors."""
+
+    username = storage.get(ACCOUNT_USERNAME_STORAGE_KEY)
+    session_token = storage.get(ACCOUNT_SESSION_STORAGE_KEY)
+    if (
+        not isinstance(username, str)
+        or not username
+        or not isinstance(session_token, str)
+        or not session_token
+    ):
+        storage.pop(ACCOUNT_SYNC_ERROR_STORAGE_KEY, None)
+        return
+    try:
+        from account_store import AccountStoreError, get_default_account_store
+
+        store = get_default_account_store()
+        account = store.resolve_session(session_token)
+        if account is None or account.username.casefold() != username.casefold():
+            storage[ACCOUNT_SYNC_ERROR_STORAGE_KEY] = (
+                "ログインの有効期限が切れました。もう一度ログインしてください。"
+            )
+            return
+        store.save_player_state(account.username, state)
+    except AccountStoreError as error:
+        storage[ACCOUNT_SYNC_ERROR_STORAGE_KEY] = str(error)
+    else:
+        storage.pop(ACCOUNT_SYNC_ERROR_STORAGE_KEY, None)
 
 
 def update_preference(
@@ -252,6 +309,12 @@ def update_preference(
         raise ValueError(f"Preference {key} must be one of: {choices}")
 
     updated = normalize_player_state(state)
+    if (
+        key == "beginner_mode"
+        and value is True
+        and updated["progression"]["simulation_unlocked"]
+    ):
+        raise ValueError("Beginner mode is retired after advanced simulation unlocks")
     updated["preferences"][key] = value
     return updated
 
@@ -327,7 +390,34 @@ def update_mode(state: object, mode: str) -> dict[str, Any]:
     if canonical not in VALID_MODES:
         raise ValueError(f"Unknown game mode: {mode}")
     updated = normalize_player_state(state)
+    if canonical == "simulation" and not updated["progression"]["simulation_unlocked"]:
+        raise ValueError("Advanced simulation unlocks after collecting all 18 core cards")
     updated["selected_mode"] = canonical
+    return updated
+
+
+def update_advanced_deck(state: object, card_ids: Sequence[str]) -> dict[str, Any]:
+    """Return state with a validated 12-to-24-card simulation deck."""
+
+    if isinstance(card_ids, (str, bytes)) or not isinstance(card_ids, Sequence):
+        raise ValueError("Advanced deck must be a sequence of card IDs")
+    if not MIN_ADVANCED_DECK_SIZE <= len(card_ids) <= MAX_ADVANCED_DECK_SIZE:
+        raise ValueError(
+            f"Advanced deck must contain {MIN_ADVANCED_DECK_SIZE} to "
+            f"{MAX_ADVANCED_DECK_SIZE} cards"
+        )
+    if any(not isinstance(card_id, str) for card_id in card_ids):
+        raise ValueError("Every advanced deck entry must be a card ID string")
+    if len(set(card_ids)) != len(card_ids):
+        raise ValueError("Advanced deck cannot contain duplicate cards")
+    unknown = [card_id for card_id in card_ids if card_id not in ADVANCED_CARD_INDEX]
+    if unknown:
+        raise ValueError(f"Unknown advanced card ID: {unknown[0]}")
+
+    updated = normalize_player_state(state)
+    if not updated["progression"]["simulation_unlocked"]:
+        raise ValueError("Advanced simulation is not unlocked")
+    updated["progression"]["advanced_deck"] = list(card_ids)
     return updated
 
 
@@ -447,6 +537,9 @@ def unlock_collection(
     collection["unlocked_formations"] = _ordered_union(
         collection["unlocked_formations"], formation_ids
     )
+    if set(CARD_INDEX).issubset(collection["owned_cards"]):
+        updated["progression"]["simulation_unlocked"] = True
+        updated["preferences"]["beginner_mode"] = False
     return updated
 
 
@@ -653,6 +746,40 @@ def _normalize_collection(source: Mapping[str, Any]) -> dict[str, list[str]]:
         "unlocked_symbols": symbols,
         "unlocked_formations": formations,
     }
+
+
+def _normalize_progression(
+    source: Mapping[str, Any], owned_cards: Sequence[str]
+) -> dict[str, Any]:
+    """Derive the advanced-mode gate and repair its saved deck."""
+
+    raw_progression = source.get("progression")
+    progression = raw_progression if isinstance(raw_progression, Mapping) else {}
+    raw_deck = progression.get("advanced_deck", source.get("advanced_deck"))
+    advanced_deck = _normalize_advanced_deck(raw_deck)
+    return {
+        # This is intentionally derived, not trusted from client storage.
+        "simulation_unlocked": set(CARD_INDEX).issubset(owned_cards),
+        "advanced_deck": advanced_deck,
+    }
+
+
+def _normalize_advanced_deck(raw: object) -> list[str]:
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+        return list(ADVANCED_STARTER_DECK)
+    result: list[str] = []
+    for card_id in raw:
+        if (
+            isinstance(card_id, str)
+            and card_id in ADVANCED_CARD_INDEX
+            and card_id not in result
+        ):
+            result.append(card_id)
+        if len(result) == MAX_ADVANCED_DECK_SIZE:
+            break
+    if len(result) < MIN_ADVANCED_DECK_SIZE:
+        return list(ADVANCED_STARTER_DECK)
+    return result
 
 
 def _normalize_tutorials(

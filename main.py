@@ -10,6 +10,21 @@ from typing import Callable, Iterator
 
 from nicegui import app, ui
 
+from account_store import (
+    AccountDatabaseError,
+    AccountStoreError,
+    AccountValidationError,
+    AuthenticationError,
+    DuplicateUsernameError,
+    get_default_account_store,
+)
+from advanced_game_data import (
+    ADVANCED_CARDS,
+    ADVANCED_STARTER_DECK,
+    AdvancedCard,
+    get_advanced_card,
+    search_advanced_cards,
+)
 from basic_tutorial import BASIC_TUTORIAL_LESSONS, BasicLesson
 from game_data import (
     CARDS,
@@ -41,12 +56,19 @@ from symbol_catalog import (
     symbols_for_family,
 )
 from player_state import (
+    ACCOUNT_SESSION_STORAGE_KEY,
+    ACCOUNT_SYNC_ERROR_STORAGE_KEY,
+    ACCOUNT_USERNAME_STORAGE_KEY,
     complete_basic_tutorial,
     complete_card_tutorial,
+    default_player_state,
     ensure_player_state,
+    normalize_player_state,
+    record_result,
     store_player_state,
     update_basic_tutorial_stage,
     update_card_tutorial_stage,
+    update_advanced_deck as update_state_advanced_deck,
     update_deck as update_state_deck,
     update_formation as update_state_formation,
     update_mode as update_state_mode,
@@ -54,11 +76,22 @@ from player_state import (
     update_profile as update_state_profile,
     update_selected_symbol as update_state_selected_symbol,
 )
-from game_engine import Phase, RuleViolation, calculate_lane_power
+from game_engine import MAX_ROUNDS, Phase, RuleViolation, calculate_lane_power
+from simulation_engine import (
+    THEATER_IDS,
+    THEATER_LABELS,
+    SimulationPhase,
+    SimulationRuleError,
+    SimulationState,
+    calculate_simulation_power,
+    new_simulation,
+    play_simulation_round,
+)
 from match_service import (
     AI_PLAYER_ID,
     HUMAN_PLAYER_ID,
     abandon_match,
+    collection_rewards_for_outcome,
     get_match_context,
     load_match,
     play_player_round,
@@ -87,11 +120,13 @@ app.add_static_files("/static", BASE_DIR / "static")
 NAV_ITEMS = (
     ("/", "ホーム", "grid_view"),
     ("/lobby", "遊ぶ", "play_circle"),
+    ("/simulation", "本格シミュレーション", "hub"),
     ("/cards", "コレクション", "style"),
     ("/tutorials", "チュートリアル", "school"),
 )
 
 MORE_NAV_ITEMS = (
+    ("/account", "アカウント", "person"),
     ("/deck", "デッキ編成", "view_carousel"),
     ("/learn", "説明書・用語集", "menu_book"),
     ("/profile", "記録・プロフィール", "military_tech"),
@@ -107,7 +142,7 @@ PHASES = (
 )
 
 TUTORIAL_STEPS = (
-    ("目的", "難しい軍事知識は不要です。6ラウンド後に相手より多くの戦線を取れば勝ちです。"),
+    ("目的", f"難しい軍事知識は不要です。{MAX_ROUNDS}ラウンド後に相手より多くの戦線を取れば勝ちです。"),
     ("制圧", "制圧力は場所を取る土台です。最初は制圧力を持つカードを選びます。"),
     ("未確認部隊", "相手の伏せたカードは正体が分かるまで『未確認部隊』と表示されます。"),
     ("偵察", "偵察値は、同じ戦線にいる未確認の相手カードを公開します。"),
@@ -116,6 +151,58 @@ TUTORIAL_STEPS = (
     ("機甲", "機甲は補給需要を完全に満たすと、1部隊につき戦線力が2上がります。"),
     ("同時命令", "あなたと相手の配置先は同時に決まります。相手カードの正体は偵察まで未確認です。"),
 )
+
+SIMULATION_MATCH_STORAGE_KEY = "advanced_simulation_match"
+SIMULATION_RECORDED_STORAGE_KEY = "advanced_simulation_recorded"
+SIMULATION_REWARDS_STORAGE_KEY = "advanced_simulation_rewards"
+
+
+def signed_in_username() -> str | None:
+    username = app.storage.user.get(ACCOUNT_USERNAME_STORAGE_KEY)
+    token = app.storage.user.get(ACCOUNT_SESSION_STORAGE_KEY)
+    if not isinstance(username, str) or not username or not isinstance(token, str):
+        return None
+    try:
+        account = get_default_account_store().resolve_session(token)
+    except AccountStoreError:
+        return None
+    if account is None or account.username.casefold() != username.casefold():
+        return None
+    return account.username
+
+
+def account_backend_label() -> str:
+    try:
+        backend = get_default_account_store().backend
+    except AccountStoreError:
+        return "保存先に接続できません"
+    return "PostgreSQL 永続保存" if backend == "postgresql" else "ローカルSQLite保存"
+
+
+def establish_account_session(username: str) -> dict[str, object]:
+    """Load an authenticated account into this NiceGUI user session."""
+
+    store = get_default_account_store()
+    raw_state = store.load_player_state(username)
+    state = normalize_player_state(raw_state)
+    token = store.create_session(username)
+    app.storage.user[ACCOUNT_USERNAME_STORAGE_KEY] = username
+    app.storage.user[ACCOUNT_SESSION_STORAGE_KEY] = token
+    stored = store_player_state(app.storage.user, state)
+    return stored
+
+
+def log_out_account() -> None:
+    token = app.storage.user.get(ACCOUNT_SESSION_STORAGE_KEY)
+    if isinstance(token, str):
+        try:
+            get_default_account_store().delete_session(token)
+        except AccountStoreError:
+            pass
+    app.storage.user.pop(ACCOUNT_USERNAME_STORAGE_KEY, None)
+    app.storage.user.pop(ACCOUNT_SESSION_STORAGE_KEY, None)
+    app.storage.user.pop(ACCOUNT_SYNC_ERROR_STORAGE_KEY, None)
+    store_player_state(app.storage.user, default_player_state())
 
 def get_preferences() -> dict[str, object]:
     return dict(ensure_player_state(app.storage.user)["preferences"])
@@ -194,7 +281,7 @@ def begin_training(*, reset: bool = True) -> None:
         else:
             start_match(app.storage.user)
     except RuleViolation:
-        ui.notify("演習にはカードを6枚以上入れたデッキが必要です。", type="warning")
+        ui.notify(f"演習にはカードを{MAX_ROUNDS}枚以上入れたデッキが必要です。", type="warning")
         go("/deck")
         return
     go("/battle")
@@ -256,6 +343,42 @@ def unit_symbol(card: UnitCard, size: str = "md", formation_id: str | None = Non
         f'data-echelon="{marker}" role="img" aria-label="{card.branch}・{formation_name}の部隊記号"'
     ):
         ui.label(card.symbol)
+
+
+def account_icon(
+    symbol_id: object,
+    fallback: str,
+    *,
+    classes: str = "battle-account__icon",
+) -> None:
+    """Render the collection symbol selected as an account avatar."""
+
+    symbol = SYMBOL_INDEX.get(str(symbol_id or ""))
+    token = symbol.token if symbol else str(fallback or "?")[:2].upper()
+    label = f"アカウントアイコン：{symbol.name}" if symbol else "アカウントアイコン"
+    ui.label(token).classes(classes).props(f'role="img" aria-label="{label}"')
+
+
+def advanced_symbol(card: AdvancedCard, *, classes: str = "simulation-card__symbol") -> None:
+    symbol = SYMBOL_INDEX.get(card.symbol_id)
+    ui.label(symbol.token if symbol else "□").classes(classes).props(
+        f'role="img" aria-label="{card.name}の記号"'
+    )
+
+
+def advanced_stats(card: AdvancedCard) -> None:
+    with ui.element("div").classes("simulation-card__stats"):
+        for label, value in (
+            ("制圧", card.control),
+            ("支援", card.support),
+            ("偵察", card.recon),
+            ("補給", f"{card.supply:+d}"),
+            ("指揮", card.command),
+            ("機動", card.mobility),
+        ):
+            with ui.element("div").classes("simulation-card__stat"):
+                ui.label(label).classes("muted")
+                ui.label(str(value)).classes("mono font-bold")
 
 
 def card_stats(card: UnitCard) -> None:
@@ -480,10 +603,10 @@ def official_deck_preview(
                     icon="check_circle",
                     on_click=lambda: apply_official_deck(deck, on_applied=on_applied),
                 )
-                if missing and len(selected_cards) < 6:
-                    ui.label("空白が多いため、対戦前に6枚以上へ調整してください。").classes("danger-text text-xs")
+                if missing and len(selected_cards) < MAX_ROUNDS:
+                    ui.label(f"空白が多いため、対戦前に{MAX_ROUNDS}枚以上へ調整してください。").classes("danger-text text-xs")
                 elif missing:
-                    ui.label("空白があっても、所持分が6枚以上なら対戦できます。").classes("muted text-xs")
+                    ui.label(f"空白があっても、所持分が{MAX_ROUNDS}枚以上なら対戦できます。").classes("muted text-xs")
 
 
 def card_tutorial_tile(tutorial: CardTutorial, player: dict[str, object]) -> None:
@@ -516,7 +639,7 @@ def card_tutorial_tile(tutorial: CardTutorial, player: dict[str, object]) -> Non
 
 @contextmanager
 def page_shell(active: str, eyebrow: str, title: str, subtitle: str) -> Iterator[None]:
-    ui.add_head_html('<link rel="stylesheet" href="/static/styles.css">')
+    ui.add_head_html('<link rel="stylesheet" href="/static/styles.css?v=20260711">')
     ui.colors(
         primary="#60AFFF",
         secondary="#55C7D9",
@@ -533,6 +656,8 @@ def page_shell(active: str, eyebrow: str, title: str, subtitle: str) -> Iterator
     selected_symbol_id = str(player_state["profile"].get("selected_symbol", ""))
     selected_symbol = SYMBOL_INDEX.get(selected_symbol_id)
     profile_mark = selected_symbol.token if selected_symbol else str(player_state["profile"]["display_name"])[:2].upper()
+    account_username = signed_in_username()
+    profile_path = "/profile" if account_username else "/account"
     apply_preferences(preferences)
 
     drawer = ui.left_drawer(value=False).props("width=246 breakpoint=1024 show-if-above bordered").classes("cg-drawer")
@@ -562,6 +687,15 @@ def page_shell(active: str, eyebrow: str, title: str, subtitle: str) -> Iterator
                 with ui.row().classes("items-center gap-2"):
                     ui.label("初心者サポート ON").classes("font-bold text-xs")
                 ui.label("まず青いボタンだけ見れば進めます。詳しい説明は必要なときに開けます。")
+        with ui.element("div").classes("drawer-account"):
+            ui.label(profile_mark).classes("drawer-account__icon")
+            with ui.column().classes("gap-0 min-w-0"):
+                ui.label(
+                    f"@{account_username}" if account_username else "ゲストプレイ"
+                ).classes("font-bold text-xs")
+                ui.label(
+                    "進行状況をDBへ保存" if account_username else "ログインすると端末を閉じても復元できます"
+                ).classes("muted text-xs")
 
     with ui.header().classes("cg-header items-center no-wrap"):
         ui.button(icon="menu", on_click=drawer.toggle).props("flat round aria-label=メニュー")
@@ -573,10 +707,30 @@ def page_shell(active: str, eyebrow: str, title: str, subtitle: str) -> Iterator
                 ui.label("統合戦線・ONLINE CARD GAME").classes("header-subtitle muted text-xs")
         ui.space()
         with ui.row().classes("items-center gap-2"):
-            chip("初心者モード" if preferences["beginner_mode"] else "標準表示", "green" if preferences["beginner_mode"] else "")
-            ui.button(profile_mark, on_click=lambda: go("/profile")).props("round unelevated aria-label=プロフィール").classes(
+            chip(
+                "上級解放" if player_state["progression"]["simulation_unlocked"]
+                else "初心者モード" if preferences["beginner_mode"] else "標準表示",
+                "yellow" if player_state["progression"]["simulation_unlocked"] else "green" if preferences["beginner_mode"] else "",
+            )
+            ui.button(profile_mark, on_click=lambda: go(profile_path)).props("round unelevated aria-label=アカウント").classes(
                 "bg-blue-9 text-white"
             )
+
+    with ui.element("nav").classes("mobile-bottom-nav"):
+        for route, label, icon in (
+            ("/", "ホーム", "home"),
+            ("/lobby", "対戦", "swords"),
+            ("/tutorials", "練習", "school"),
+            ("/cards", "収集", "style"),
+            (profile_path, "アカウント", "person"),
+        ):
+            active_class = " mobile-bottom-nav__button--active" if route == active else ""
+            with ui.button(
+                icon=icon, on_click=lambda path=route: go(path)
+            ).props(f"flat no-caps aria-label={label}").classes(
+                f"mobile-bottom-nav__button{active_class}"
+            ):
+                ui.label(label).classes("mobile-bottom-nav__label")
 
     with ui.column().classes("cg-page"):
         with ui.column().classes("gap-1 w-full"):
@@ -663,7 +817,7 @@ def home_page() -> None:
                 ui.icon("flag", size="28px").classes("blue-text")
                 with ui.column().classes("gap-0"):
                     ui.label("ゲームの目的").classes("font-bold")
-                    ui.label("6ラウンド後に、相手より多くの戦線を取れば勝ちです。").classes("section-subtitle")
+                    ui.label(f"{MAX_ROUNDS}ラウンド後に、相手より多くの戦線を取れば勝ちです。").classes("section-subtitle")
 
         with ui.expansion("ほかの情報を見る", icon="unfold_more").classes("details-expansion"):
             with ui.element("div").classes("metric-grid mt-3"):
@@ -1203,17 +1357,45 @@ def card_tutorial_page(card_id: str) -> None:
                     if stage.choices:
                         ui.separator().classes("bg-blue-grey-8 my-2")
                         ui.label(stage.question).classes("font-bold text-lg")
-                        with ui.element("div").classes("tutorial-choice-grid"):
-                            for choice in stage.choices:
-                                selected = view["answer"] == choice
-                                state_class = " tutorial-choice--selected" if selected else ""
-                                if selected and view["correct"]:
-                                    state_class += " tutorial-choice--correct"
-                                with ui.button(
-                                    choice,
-                                    on_click=lambda value=choice: answer_card_check(value),
-                                ).props("no-caps unelevated").classes(f"tutorial-choice{state_class}"):
-                                    pass
+                        if stage.exercise_lanes:
+                            ui.label(
+                                "カードを置くならどこか、3つの戦線を見比べて選びます。"
+                            ).classes("muted text-xs")
+                            with ui.element("div").classes("tutorial-field-grid tutorial-lane-grid"):
+                                for lane in stage.exercise_lanes:
+                                    selected = view["answer"] == lane.label
+                                    state_class = " tutorial-lane--selected" if selected else ""
+                                    if selected and view["correct"]:
+                                        state_class += " tutorial-lane--correct"
+                                    with ui.element("div").classes(f"tutorial-lane{state_class}"):
+                                        with ui.row().classes("w-full items-center justify-between"):
+                                            ui.label(lane.label).classes("font-bold")
+                                            difference = lane.player_power - lane.enemy_power
+                                            chip(
+                                                "味方優勢" if difference > 0 else "敵優勢" if difference < 0 else "互角",
+                                                "green" if difference > 0 else "red" if difference < 0 else "yellow",
+                                            )
+                                        ui.label(lane.situation).classes("section-subtitle")
+                                        with ui.element("div").classes("control-meter"):
+                                            ui.label(f"味方 {lane.player_power}").classes("blue-text")
+                                            ui.label("現在の戦線力").classes("muted")
+                                            ui.label(f"敵 {lane.enemy_power}").classes("danger-text text-right")
+                                        ui.button(
+                                            "ここへ配備", icon="place",
+                                            on_click=lambda value=lane.label: answer_card_check(value),
+                                        ).props("flat no-caps").classes("card-action")
+                        else:
+                            with ui.element("div").classes("tutorial-choice-grid"):
+                                for choice in stage.choices:
+                                    selected = view["answer"] == choice
+                                    state_class = " tutorial-choice--selected" if selected else ""
+                                    if selected and view["correct"]:
+                                        state_class += " tutorial-choice--correct"
+                                    with ui.button(
+                                        choice,
+                                        on_click=lambda value=choice: answer_card_check(value),
+                                    ).props("no-caps unelevated").classes(f"tutorial-choice{state_class}"):
+                                        pass
 
                     if view["feedback"]:
                         status_class = " tutorial-feedback--correct" if view["correct"] else " tutorial-feedback--hint"
@@ -1412,7 +1594,7 @@ def symbols_page() -> None:
                 return
             store_player_state(app.storage.user, state)
             family_view.refresh()
-            ui.notify("プロフィール章を変更しました。", type="positive")
+            ui.notify("アカウントアイコンを変更しました。", type="positive")
 
         ui.select(
             list(family_by_name), value=catalog_state["family"], label="見る分類を1つ選ぶ",
@@ -1453,7 +1635,7 @@ def symbols_page() -> None:
                                 chip("使用中", "yellow")
                             elif symbol.id in unlocked_symbols:
                                 ui.button(
-                                    "章にする", icon="verified",
+                                    "アイコンにする", icon="account_circle",
                                     on_click=lambda sid=symbol.id: select_emblem(sid),
                                 ).props("flat dense no-caps").classes("symbol-try-button")
                             else:
@@ -1592,7 +1774,7 @@ def deck_page() -> None:
         def use_current_deck() -> None:
             deck = ensure_player_state(app.storage.user)["deck"]
             if len(deck) < 6:
-                ui.notify("対戦にはカードを6枚以上入れてください。", type="warning")
+                ui.notify(f"対戦にはカードを{MAX_ROUNDS}枚以上入れてください。", type="warning")
                 return
             ui.notify("このデッキを使用します。", type="positive")
             go("/lobby")
@@ -1876,7 +2058,11 @@ def online_queue_page() -> None:
                 with ui.column().classes("w-full items-center text-center gap-3 py-5"):
                     ui.spinner("dots", size="58px", color="primary")
                     ui.label("対戦相手を待っています").classes("text-2xl font-bold")
-                    ui.label(f"モード：{mode_label} / 名前：{display_name}").classes("section-subtitle")
+                    with ui.element("div").classes("battle-account"):
+                        account_icon(player["profile"].get("selected_symbol"), display_name)
+                        with ui.column().classes("gap-0 text-left"):
+                            ui.label(display_name).classes("font-bold")
+                            ui.label(f"モード：{mode_label}").classes("section-subtitle")
                     if view.get("queue_position"):
                         chip(f"待機順 {view['queue_position']}", "yellow")
                     ui.label("この画面を開いた別のプレイヤーが来ると自動で開始します。").classes("muted text-xs")
@@ -1970,6 +2156,11 @@ def friend_room_page() -> None:
                 return
             if status == "waiting_friend":
                 with ui.card().classes("panel panel--strong"):
+                    with ui.element("div").classes("battle-account"):
+                        account_icon(player["profile"].get("selected_symbol"), display_name)
+                        with ui.column().classes("gap-0"):
+                            ui.label(display_name).classes("font-bold")
+                            ui.label("部屋の作成者").classes("muted text-xs")
                     ui.label("この合言葉を友人へ送ってください").classes("font-bold")
                     ui.label(str(view["room_code"])).classes("mono text-4xl font-bold blue-text my-3")
                     ui.label("参加を待っています（1 / 2）").classes("section-subtitle")
@@ -2163,16 +2354,23 @@ def multiplayer_battle_page() -> None:
             formation = get_formation(str(view.get("formation", "native")))
 
             with ui.element("div").classes("battle-status"):
-                with ui.column().classes("gap-0"):
-                    ui.label(f"{human['name']} / あなた").classes("font-bold")
-                    ui.label(f"任務点 {human['mission_points']}").classes("mono blue-text text-xs")
+                with ui.element("div").classes("battle-account"):
+                    account_icon(view.get("player", {}).get("icon_symbol_id"), str(human["name"]))
+                    with ui.column().classes("gap-0"):
+                        ui.label(f"{human['name']} / あなた").classes("font-bold")
+                        ui.label(f"任務点 {human['mission_points']}").classes("mono blue-text text-xs")
                 with ui.column().classes("items-center gap-0"):
                     ui.label(f"ROUND {game['round_no']} / {game['max_rounds']}").classes("mono text-xl font-bold")
                     ui.label("送信済み・相手を待機" if submitted else "命令を選んでください").classes("muted text-xs")
-                with ui.column().classes("items-end gap-0"):
-                    ui.label(f"{view['opponent']['name']} / 相手").classes("font-bold")
-                    connection = "退出" if view["opponent"]["left"] else "接続中" if view["opponent"]["connected"] else "再接続待ち"
-                    ui.label(f"任務点 {opponent['mission_points']}・{connection}").classes("green-text text-xs")
+                with ui.element("div").classes("battle-account"):
+                    account_icon(
+                        view.get("opponent", {}).get("icon_symbol_id"),
+                        str(view["opponent"]["name"]),
+                    )
+                    with ui.column().classes("items-end gap-0"):
+                        ui.label(f"{view['opponent']['name']} / 相手").classes("font-bold")
+                        connection = "退出" if view["opponent"]["left"] else "接続中" if view["opponent"]["connected"] else "再接続待ち"
+                        ui.label(f"任務点 {opponent['mission_points']}・{connection}").classes("green-text text-xs")
 
             if status == "opponent_left":
                 with ui.element("div").classes("result-banner"):
@@ -2392,7 +2590,7 @@ def battle_page() -> None:
     except RuleViolation:
         with page_shell(
             "/lobby", "LIVE OPERATION", "対戦を開始できません",
-            "対戦には所持しているカードを6枚以上入れたデッキが必要です。",
+            f"対戦には所持しているカードを{MAX_ROUNDS}枚以上入れたデッキが必要です。",
         ):
             with ui.card().classes("panel"):
                 ui.icon("warning", size="38px").classes("yellow-text")
@@ -2539,9 +2737,14 @@ def battle_page() -> None:
             opponent = active.players[AI_PLAYER_ID]
 
             with ui.element("div").classes("battle-status"):
-                with ui.column().classes("gap-0"):
-                    ui.label(f"{player['profile']['display_name']} / あなた").classes("font-bold")
-                    ui.label(f"任務点 {human.mission_points}").classes("mono blue-text text-xs")
+                with ui.element("div").classes("battle-account"):
+                    account_icon(
+                        player["profile"].get("selected_symbol"),
+                        str(player["profile"]["display_name"]),
+                    )
+                    with ui.column().classes("gap-0"):
+                        ui.label(f"{player['profile']['display_name']} / あなた").classes("font-bold")
+                        ui.label(f"任務点 {human.mission_points}").classes("mono blue-text text-xs")
                 with ui.column().classes("items-center gap-0"):
                     ui.label(f"ROUND {active.round_no} / {active.max_rounds}").classes("mono text-xl font-bold")
                     ui.label("解決済み" if active.phase is Phase.COMPLETE else "命令を選んでください").classes("muted text-xs")
@@ -2740,6 +2943,630 @@ def battle_page() -> None:
         battle_board()
 
 
+def start_fresh_simulation(player: dict[str, object] | None = None) -> SimulationState:
+    """Create and persist a fresh advanced match for the current browser."""
+
+    current = player or ensure_player_state(app.storage.user)
+    current = update_state_mode(current, "simulation")
+    current = store_player_state(app.storage.user, current)
+    deck = list(current["progression"]["advanced_deck"])
+    state = new_simulation(
+        deck,
+        player_name=str(current["profile"]["display_name"]),
+    )
+    app.storage.user[SIMULATION_MATCH_STORAGE_KEY] = state.to_dict()
+    app.storage.user.pop(SIMULATION_RECORDED_STORAGE_KEY, None)
+    app.storage.user.pop(SIMULATION_REWARDS_STORAGE_KEY, None)
+    return state
+
+
+def load_or_start_simulation(player: dict[str, object]) -> SimulationState:
+    raw = app.storage.user.get(SIMULATION_MATCH_STORAGE_KEY)
+    if isinstance(raw, dict):
+        try:
+            return SimulationState.from_dict(raw)
+        except (KeyError, TypeError, ValueError, SimulationRuleError):
+            pass
+    return start_fresh_simulation(player)
+
+
+def save_simulation(state: SimulationState) -> None:
+    app.storage.user[SIMULATION_MATCH_STORAGE_KEY] = state.to_dict()
+
+
+def record_simulation_completion(state: SimulationState) -> None:
+    """Record one advanced result and grant the same outcome-based symbols."""
+
+    if state.result is None:
+        return
+    if app.storage.user.get(SIMULATION_RECORDED_STORAGE_KEY) == state.game_id:
+        return
+    result = (
+        "win" if state.result.winner_id == "player"
+        else "draw" if state.result.winner_id is None
+        else "loss"
+    )
+    player = ensure_player_state(app.storage.user)
+    rewards = collection_rewards_for_outcome(player, result)
+    updated = record_result(
+        player,
+        result,
+        mode="simulation",
+        opponent="統合作戦AI",
+        mission_points_for=state.players["player"].mission_points,
+        mission_points_against=state.players["opponent"].mission_points,
+        turns=state.result.rounds_played,
+        summary=state.result.summary,
+        unlocked_symbols=rewards["symbols"],
+    )
+    store_player_state(app.storage.user, updated)
+    app.storage.user[SIMULATION_RECORDED_STORAGE_KEY] = state.game_id
+    app.storage.user[SIMULATION_REWARDS_STORAGE_KEY] = rewards
+
+
+@ui.page("/simulation")
+def simulation_page() -> None:
+    with page_shell(
+        "/simulation", "ADVANCED SIMULATION", "本格統合作戦シミュレーション",
+        "基本18枚を集めた後の上級ルールです。全201記号をカードとして使い、12ターンで3作戦域を争います。",
+    ):
+        player = ensure_player_state(app.storage.user)
+        owned_count = len(player["collection"]["owned_cards"])
+        if not player["progression"]["simulation_unlocked"]:
+            with ui.element("section").classes("simulation-hero"):
+                ui.icon("lock", size="44px").classes("yellow-text")
+                with ui.column().classes("gap-2 flex-1"):
+                    chip(f"基本カード {owned_count} / {len(CARDS)}枚", "yellow")
+                    ui.label("まず18枚を集めると開放されます").classes("text-2xl font-bold")
+                    ui.label(
+                        "通常対戦で基本カードを少しずつ集めてください。開放後も、これまでの18枚ルールは"
+                        "『カジュアル』としていつでも遊べます。"
+                    ).classes("section-subtitle")
+                    ui.linear_progress(value=owned_count / len(CARDS)).props(
+                        "rounded size=10px"
+                    ).classes("progress-track w-full")
+                    with ui.row().classes("gap-2"):
+                        primary_button("通常対戦で集める", "/lobby", "play_arrow")
+                        secondary_button("所持カードを確認", "/advanced-cards", "style")
+            with ui.card().classes("panel"):
+                section_heading("開放後に増える要素", "いきなり覚える必要はありません。画面内で意味を説明します。")
+                with ui.element("div").classes("three-grid mt-3"):
+                    for title, text, icon in (
+                        ("全201カード", "参照画像のすべての記号が、検索できるカードになります。", "library_books"),
+                        ("12ターン", "通常の9ラウンドより長く、複数の作戦を組み立てます。", "schedule"),
+                        ("統合作戦", "制圧・支援・偵察・補給に、指揮・機動・領域連携が加わります。", "hub"),
+                    ):
+                        with ui.element("div").classes("simulation-status"):
+                            ui.icon(icon).classes("blue-text")
+                            ui.label(title).classes("font-bold")
+                            ui.label(text).classes("section-subtitle")
+            return
+
+        player = update_state_mode(player, "simulation")
+        player = store_player_state(app.storage.user, player)
+        state = load_or_start_simulation(player)
+        selection: dict[str, str | None] = {"card": None, "theater": None}
+
+        def select_simulation_card(card_id: str) -> None:
+            active = load_or_start_simulation(ensure_player_state(app.storage.user))
+            if active.phase is SimulationPhase.COMPLETE:
+                return
+            if card_id not in active.players["player"].hand:
+                ui.notify("そのカードはすでに使用しました。", type="warning")
+                return
+            selection["card"] = card_id
+            simulation_board.refresh()
+
+        def select_theater(theater_id: str) -> None:
+            selection["theater"] = theater_id
+            simulation_board.refresh()
+
+        def execute_simulation_order() -> None:
+            card_id = selection.get("card")
+            theater_id = selection.get("theater")
+            if not card_id or not theater_id:
+                ui.notify("カードと配備先の作戦域を選んでください。", type="warning")
+                return
+            active = load_or_start_simulation(ensure_player_state(app.storage.user))
+            try:
+                play_simulation_round(active, "player", card_id, theater_id)
+            except SimulationRuleError as error:
+                ui.notify(str(error), type="negative")
+                return
+            save_simulation(active)
+            selection.update(card=None, theater=None)
+            if active.phase is SimulationPhase.COMPLETE:
+                record_simulation_completion(active)
+                ui.notify("12ターンの結果を確定しました。", type="positive")
+            else:
+                ui.notify(f"第{active.round_no - 1}ターンを解決しました。", type="positive")
+            simulation_board.refresh()
+
+        def reset_simulation() -> None:
+            start_fresh_simulation(ensure_player_state(app.storage.user))
+            selection.update(card=None, theater=None)
+            simulation_board.refresh()
+            ui.notify("新しい12ターン作戦を開始しました。", type="positive")
+
+        @ui.refreshable
+        def simulation_board() -> None:
+            active = load_or_start_simulation(ensure_player_state(app.storage.user))
+            if active.phase is SimulationPhase.COMPLETE:
+                record_simulation_completion(active)
+            human = active.players["player"]
+            opponent = active.players["opponent"]
+
+            with ui.element("section").classes("simulation-hero"):
+                with ui.column().classes("gap-1 flex-1"):
+                    chip("上級ルール", "yellow")
+                    ui.label("3つの作戦域へ、毎ターン1枚を配備").classes("text-2xl font-bold")
+                    ui.label(
+                        "まずカード、次に作戦域を選びます。相手も同時に1枚を置き、ターンごとに任務点を争います。"
+                    ).classes("section-subtitle")
+                with ui.row().classes("gap-2"):
+                    secondary_button("24枚デッキを編集", "/simulation-deck", "tune")
+                    secondary_button("最初から", icon="restart_alt", on_click=reset_simulation)
+
+            with ui.element("div").classes("simulation-status-grid"):
+                with ui.element("div").classes("simulation-status"):
+                    ui.label("ターン").classes("muted text-xs")
+                    ui.label(
+                        f"{active.max_rounds} / {active.max_rounds}" if active.phase is SimulationPhase.COMPLETE
+                        else f"{active.round_no} / {active.max_rounds}"
+                    ).classes("mono text-2xl font-bold")
+                with ui.element("div").classes("simulation-status"):
+                    ui.label("あなたの任務点").classes("muted text-xs")
+                    ui.label(str(human.mission_points)).classes("mono text-2xl font-bold blue-text")
+                with ui.element("div").classes("simulation-status"):
+                    ui.label("AIの任務点").classes("muted text-xs")
+                    ui.label(str(opponent.mission_points)).classes("mono text-2xl font-bold danger-text")
+
+            if active.phase is SimulationPhase.COMPLETE and active.result is not None:
+                winner = active.result.winner_id
+                title = "作戦成功" if winner == "player" else "引き分け" if winner is None else "作戦終了"
+                color = "green-text" if winner == "player" else "yellow-text" if winner is None else "danger-text"
+                rewards = app.storage.user.get(SIMULATION_REWARDS_STORAGE_KEY, {})
+                with ui.element("div").classes("result-banner"):
+                    ui.label(title).classes(f"text-3xl font-bold {color}")
+                    ui.label(active.result.summary).classes("section-subtitle mt-2")
+                    ui.label(
+                        f"最終確保：あなた {active.result.theaters_controlled['player']}域 / "
+                        f"AI {active.result.theaters_controlled['opponent']}域"
+                    ).classes("font-bold mt-2")
+                    if isinstance(rewards, dict) and rewards.get("symbols"):
+                        ui.label(
+                            f"コレクション報酬：アカウントアイコン用の記号 {len(rewards['symbols'])}種類"
+                        ).classes("text-sm yellow-text")
+                    with ui.row().classes("gap-2 mt-4"):
+                        primary_button("新しい作戦", icon="replay", on_click=reset_simulation)
+                        secondary_button("戦績を見る", "/profile", "military_tech")
+                        secondary_button("通常の18枚ルール", "/lobby", "style")
+                return
+
+            ui.label("作戦域を選ぶ").classes("section-title")
+            ui.label(
+                "表示中の敵戦力は偵察済みのカードだけです。『未確認』があれば実際はさらに高い可能性があります。"
+            ).classes("section-subtitle")
+            with ui.element("div").classes("simulation-theater-grid"):
+                for theater_id in THEATER_IDS:
+                    theater = active.theaters[theater_id]
+                    own_power = calculate_simulation_power(active, theater_id, "player")
+                    visible_enemy = calculate_simulation_power(
+                        active, theater_id, "opponent", visible_to="player"
+                    )
+                    own_units = [item for item in theater.deployments if item.player_id == "player"]
+                    enemy_units = [item for item in theater.deployments if item.player_id == "opponent"]
+                    hidden_count = sum(not item.visible_to("player") for item in enemy_units)
+                    selected_class = (
+                        " simulation-theater--selected"
+                        if selection.get("theater") == theater_id else ""
+                    )
+                    with ui.element("div").classes(f"simulation-theater{selected_class}"):
+                        with ui.row().classes("w-full items-center justify-between"):
+                            ui.label(theater.label).classes("font-bold")
+                            chip(f"未確認 {hidden_count}" if hidden_count else "偵察済み", "yellow" if hidden_count else "green")
+                        with ui.element("div").classes("control-meter"):
+                            ui.label(f"味方 {own_power.total}").classes("blue-text")
+                            ui.label("現在戦力").classes("muted")
+                            ui.label(
+                                f"敵 {visible_enemy.total}+?" if hidden_count else f"敵 {visible_enemy.total}"
+                            ).classes("danger-text text-right")
+                        ui.label("味方の配備").classes("muted text-xs")
+                        ui.label(
+                            "・".join(get_advanced_card(item.card_id).name for item in own_units[-3:])
+                            or "まだ配備なし"
+                        ).classes("text-sm font-bold")
+                        ui.label(
+                            f"制圧 {own_power.control} / 有効支援 {own_power.active_support} / "
+                            f"補給不足 {own_power.supply_deficit} / 領域連携 +{own_power.domain_bonus}"
+                        ).classes("muted text-xs")
+                        ui.button(
+                            "この作戦域を選ぶ", icon="place",
+                            on_click=lambda tid=theater_id: select_theater(tid),
+                        ).props("flat no-caps").classes("card-action")
+
+            with ui.card().classes("panel simulation-hand"):
+                with ui.row().classes("w-full items-center justify-between gap-3"):
+                    with ui.column().classes("gap-0"):
+                        ui.label(f"手札（残り {len(human.hand)}枚）").classes("section-title")
+                        ui.label("この作戦では12枚を使います。カード名より、まず高い数値を1つ見てください。").classes("section-subtitle")
+                    chip(
+                        get_advanced_card(str(selection["card"])).name if selection.get("card") else "カード未選択",
+                        "green" if selection.get("card") else "",
+                    )
+                with ui.element("div").classes("simulation-card-grid"):
+                    for card_id in human.hand:
+                        card = get_advanced_card(card_id)
+                        selected_class = (
+                            " simulation-card--selected" if selection.get("card") == card_id else ""
+                        )
+                        card_element = ui.card().classes(f"simulation-card{selected_class}")
+                        card_element.on("click", lambda cid=card_id: select_simulation_card(cid))
+                        with card_element:
+                            with ui.row().classes("w-full items-start justify-between gap-2 no-wrap"):
+                                with ui.column().classes("gap-0 min-w-0"):
+                                    ui.label(card.domain.value).classes("page-eyebrow")
+                                    ui.label(card.name).classes("font-bold text-sm")
+                                chip(card.rarity, "yellow" if card.rarity != "標準" else "")
+                            advanced_symbol(card)
+                            ui.label(card.plain_role).classes("muted text-xs")
+                            advanced_stats(card)
+
+                with ui.element("div").classes("simulation-controls"):
+                    if selection.get("card") and selection.get("theater"):
+                        ui.label(
+                            f"予定：{get_advanced_card(str(selection['card'])).name}を"
+                            f"{THEATER_LABELS[str(selection['theater'])]}へ配備"
+                        ).classes("font-bold")
+                    else:
+                        ui.label("カードと作戦域を1つずつ選んでください").classes("muted text-sm")
+                    confirm = primary_button(
+                        "命令を確定して1ターン進める", icon="check",
+                        on_click=execute_simulation_order,
+                    )
+                    if not selection.get("card") or not selection.get("theater"):
+                        confirm.props("disable")
+
+            with ui.expansion("上級ルールの数字を確認", icon="menu_book").classes("details-expansion"):
+                with ui.element("div").classes("three-grid mt-3"):
+                    for title, body in (
+                        ("指揮", "同じ作戦域の指揮合計3ごとに+1。最大+6です。"),
+                        ("機動", "同じ作戦域の機動合計5ごとに+1。最大+4です。"),
+                        ("領域連携", "陸・海・空宇宙など異なる領域が2種類以上そろうと、追加1領域ごとに+2です。"),
+                    ):
+                        with ui.element("div").classes("simulation-status"):
+                            ui.label(title).classes("font-bold blue-text")
+                            ui.label(body).classes("section-subtitle")
+
+        simulation_board()
+
+
+@ui.page("/simulation-deck")
+def simulation_deck_page() -> None:
+    with page_shell(
+        "/simulation", "ADVANCED DECK", "本格シミュレーション用デッキ",
+        "全201カードから12〜24枚を選びます。最初は自動作成された24枚のままで問題ありません。",
+    ):
+        player = ensure_player_state(app.storage.user)
+        if not player["progression"]["simulation_unlocked"]:
+            with ui.card().classes("panel"):
+                ui.label("このデッキ編集は基本18枚を集めると開放されます。").classes("text-xl font-bold")
+                secondary_button("開放条件を見る", "/simulation", "lock").classes("mt-3")
+            return
+
+        filter_state: dict[str, object] = {"visible": 24}
+
+        def refresh_filters() -> None:
+            filter_state["visible"] = 24
+            advanced_catalog.refresh()
+
+        def toggle_advanced_card(card_id: str) -> None:
+            current = ensure_player_state(app.storage.user)
+            selected = list(current["progression"]["advanced_deck"])
+            if card_id in selected:
+                if len(selected) <= 12:
+                    ui.notify("対戦に必要な最低12枚は残してください。", type="warning")
+                    return
+                selected.remove(card_id)
+            else:
+                if len(selected) >= 24:
+                    ui.notify("最大24枚です。先に1枚外してください。", type="warning")
+                    return
+                selected.append(card_id)
+            try:
+                current = update_state_advanced_deck(current, selected)
+            except ValueError as error:
+                ui.notify(str(error), type="negative")
+                return
+            store_player_state(app.storage.user, current)
+            selected_deck.refresh()
+            advanced_catalog.refresh()
+
+        def reset_advanced_deck() -> None:
+            current = update_state_advanced_deck(
+                ensure_player_state(app.storage.user), ADVANCED_STARTER_DECK
+            )
+            store_player_state(app.storage.user, current)
+            selected_deck.refresh()
+            advanced_catalog.refresh()
+            ui.notify("領域を均等にした公式24枚へ戻しました。", type="positive")
+
+        def start_selected_simulation() -> None:
+            start_fresh_simulation(ensure_player_state(app.storage.user))
+            go("/simulation")
+
+        with ui.element("section").classes("simulation-hero"):
+            with ui.column().classes("gap-1 flex-1"):
+                chip("全201カード使用可能", "green")
+                ui.label("全部を一度に読む必要はありません").classes("text-2xl font-bold")
+                ui.label(
+                    "検索と領域フィルターで少しずつ見られます。24枚のうち実戦で使うのは12枚です。"
+                ).classes("section-subtitle")
+            with ui.row().classes("gap-2"):
+                primary_button("このデッキで新規作戦", icon="play_arrow", on_click=start_selected_simulation)
+                secondary_button("公式24枚へ戻す", icon="restart_alt", on_click=reset_advanced_deck)
+
+        @ui.refreshable
+        def selected_deck() -> None:
+            current = ensure_player_state(app.storage.user)
+            deck = list(current["progression"]["advanced_deck"])
+            section_heading(
+                f"選択中 {len(deck)} / 24枚",
+                "カードを押すと外せます。12枚未満にはできません。",
+            )
+            with ui.element("div").classes("simulation-deck-grid"):
+                for card_id in deck:
+                    card = get_advanced_card(card_id)
+                    with ui.button(
+                        on_click=lambda cid=card_id: toggle_advanced_card(cid)
+                    ).props("flat no-caps").classes("simulation-card simulation-card--selected"):
+                        advanced_symbol(card)
+                        ui.label(card.name).classes("font-bold text-xs")
+                        ui.label(f"{card.domain.value}・{card.play_kind.value}").classes("muted text-xs")
+
+        selected_deck()
+
+        domain_values = ["すべて", *dict.fromkeys(card.domain.value for card in ADVANCED_CARDS)]
+        kind_values = ["すべて", *dict.fromkeys(card.play_kind.value for card in ADVANCED_CARDS)]
+        with ui.element("div").classes("simulation-filter-bar"):
+            query_input = ui.input(
+                "カード名・役割を検索", placeholder="例：偵察、航空、補給",
+                on_change=lambda _: refresh_filters(),
+            ).props("outlined clearable").classes("filter-control")
+            domain_select = ui.select(
+                domain_values, value="すべて", label="領域",
+                on_change=lambda _: refresh_filters(),
+            ).props("outlined options-dense").classes("filter-control")
+            kind_select = ui.select(
+                kind_values, value="すべて", label="種類",
+                on_change=lambda _: refresh_filters(),
+            ).props("outlined options-dense").classes("filter-control")
+
+        @ui.refreshable
+        def advanced_catalog() -> None:
+            query = str(query_input.value or "")
+            domain = None if domain_select.value == "すべて" else str(domain_select.value)
+            kind = None if kind_select.value == "すべて" else str(kind_select.value)
+            matches = search_advanced_cards(query, domain=domain, play_kind=kind)
+            visible = min(len(matches), int(filter_state["visible"]))
+            deck = set(ensure_player_state(app.storage.user)["progression"]["advanced_deck"])
+            section_heading(
+                f"カード一覧 {len(matches)}件",
+                f"最初の{visible}件を表示中。選択中のカードには青い枠が付きます。",
+            )
+            if not matches:
+                ui.label("条件に合うカードがありません。検索語を短くしてみてください。").classes("section-subtitle")
+                return
+            with ui.element("div").classes("simulation-card-grid"):
+                for card in matches[:visible]:
+                    selected_class = " simulation-card--selected" if card.id in deck else ""
+                    element = ui.card().classes(f"simulation-card{selected_class}")
+                    element.on("click", lambda cid=card.id: toggle_advanced_card(cid))
+                    with element:
+                        with ui.row().classes("w-full items-start justify-between gap-2 no-wrap"):
+                            with ui.column().classes("gap-0 min-w-0"):
+                                ui.label(card.domain.value).classes("page-eyebrow")
+                                ui.label(card.name).classes("font-bold text-sm")
+                            chip("選択中", "green") if card.id in deck else chip(card.rarity)
+                        advanced_symbol(card)
+                        ui.label(f"{card.play_kind.value}・{card.plain_role}").classes("muted text-xs")
+                        advanced_stats(card)
+            if visible < len(matches):
+                secondary_button(
+                    "さらに24件を見る", icon="expand_more",
+                    on_click=lambda: (
+                        filter_state.update(visible=int(filter_state["visible"]) + 24),
+                        advanced_catalog.refresh(),
+                    ),
+                ).classes("mt-3")
+
+        advanced_catalog()
+
+
+@ui.page("/account")
+def account_page() -> None:
+    username = signed_in_username()
+    with page_shell(
+        "/account", "ACCOUNT", "アカウントと保存",
+        "ログインすると、カード・記号・デッキ・戦績・チュートリアル進捗をデータベースから復元できます。",
+    ):
+        if username:
+            player = ensure_player_state(app.storage.user)
+            selected_symbol = SYMBOL_INDEX.get(
+                str(player["profile"].get("selected_symbol", ""))
+            )
+            avatar = selected_symbol.token if selected_symbol else str(
+                player["profile"]["display_name"]
+            )[:2].upper()
+
+            with ui.element("section").classes("account-hero"):
+                ui.label(avatar).classes("account-avatar")
+                with ui.column().classes("gap-1 flex-1"):
+                    chip("ログイン済み", "green")
+                    ui.label(str(player["profile"]["display_name"])).classes("text-2xl font-bold")
+                    ui.label(f"@{username}・{account_backend_label()}").classes("section-subtitle")
+                    if selected_symbol:
+                        ui.label(f"アカウントアイコン：{selected_symbol.name}").classes("blue-text text-sm")
+                secondary_button("ログアウト", icon="logout", on_click=lambda: (log_out_account(), go("/")))
+
+            sync_error = app.storage.user.get(ACCOUNT_SYNC_ERROR_STORAGE_KEY)
+            if sync_error:
+                with ui.element("div").classes("beginner-callout beginner-callout--yellow"):
+                    ui.label("データベースへの保存を再試行します").classes("font-bold")
+                    ui.label(str(sync_error)).classes("text-sm")
+
+            def save_account_name() -> None:
+                value = str(display_name_input.value or "")
+                try:
+                    account = get_default_account_store().update_display_name(username, value)
+                    state = update_state_profile(
+                        ensure_player_state(app.storage.user),
+                        display_name=account.display_name,
+                    )
+                    store_player_state(app.storage.user, state)
+                except (AccountStoreError, ValueError) as error:
+                    ui.notify(str(error), type="negative")
+                    return
+                ui.notify("表示名を保存しました。", type="positive")
+                go("/account")
+
+            def choose_account_icon(symbol_id: str) -> None:
+                try:
+                    state = update_state_selected_symbol(
+                        ensure_player_state(app.storage.user), symbol_id
+                    )
+                    store_player_state(app.storage.user, state)
+                except ValueError as error:
+                    ui.notify(str(error), type="warning")
+                    return
+                ui.notify("アカウントアイコンを変更しました。", type="positive")
+                go("/account")
+
+            with ui.element("div").classes("content-grid"):
+                with ui.card().classes("panel"):
+                    section_heading("表示名", "対戦相手やフレンド部屋に表示されます。")
+                    display_name_input = ui.input(
+                        "表示名", value=str(player["profile"]["display_name"])
+                    ).props("outlined maxlength=20").classes("filter-control w-full mt-3")
+                    primary_button("表示名を保存", icon="save", on_click=save_account_name).classes("mt-3")
+
+                with ui.card().classes("panel"):
+                    section_heading(
+                        "アカウントアイコン",
+                        "コレクションで獲得した記号だけを選べます。ヘッダーと対戦部屋へ共通反映します。",
+                    )
+                    unlocked = set(player["collection"]["unlocked_symbols"])
+                    with ui.element("div").classes("account-icon-grid mt-3"):
+                        for symbol in SYMBOL_CATALOG:
+                            if symbol.id not in unlocked:
+                                continue
+                            is_selected = (
+                                selected_symbol is not None
+                                and symbol.id == selected_symbol.id
+                            )
+                            active_class = " account-icon-option--active" if is_selected else ""
+                            with ui.button(
+                                on_click=lambda sid=symbol.id: choose_account_icon(sid)
+                            ).props(
+                                f'flat no-caps aria-label="{symbol.name}をアイコンに設定"'
+                            ).classes(
+                                f"account-icon-option{active_class}"
+                            ):
+                                ui.label(symbol.token).classes("account-icon-option__token")
+                                ui.label(symbol.name).classes("account-icon-option__name")
+            return
+
+        login_state = {"busy": False}
+
+        def login() -> None:
+            if login_state["busy"]:
+                return
+            login_state["busy"] = True
+            try:
+                account = get_default_account_store().authenticate(
+                    str(login_username.value or ""), str(login_password.value or "")
+                )
+                establish_account_session(account.username)
+            except AuthenticationError:
+                ui.notify("ユーザー名またはパスワードが違います。", type="negative")
+                login_state["busy"] = False
+                return
+            except AccountStoreError as error:
+                ui.notify(str(error), type="negative")
+                login_state["busy"] = False
+                return
+            ui.notify("ログインしました。保存データを復元しました。", type="positive")
+            go("/")
+
+        def register() -> None:
+            if login_state["busy"]:
+                return
+            if str(register_password.value or "") != str(register_confirm.value or ""):
+                ui.notify("確認用パスワードが一致しません。", type="warning")
+                return
+            login_state["busy"] = True
+            try:
+                guest_state = update_state_profile(
+                    ensure_player_state(app.storage.user),
+                    display_name=str(register_display_name.value or ""),
+                )
+                account = get_default_account_store().register(
+                    str(register_username.value or ""),
+                    str(register_password.value or ""),
+                    str(register_display_name.value or ""),
+                    guest_state,
+                )
+                token = get_default_account_store().create_session(account.username)
+                app.storage.user[ACCOUNT_USERNAME_STORAGE_KEY] = account.username
+                app.storage.user[ACCOUNT_SESSION_STORAGE_KEY] = token
+                store_player_state(app.storage.user, guest_state)
+            except DuplicateUsernameError:
+                ui.notify("そのユーザー名はすでに使われています。", type="warning")
+                login_state["busy"] = False
+                return
+            except (AccountValidationError, AccountDatabaseError, ValueError) as error:
+                ui.notify(str(error), type="negative")
+                login_state["busy"] = False
+                return
+            ui.notify("アカウントを作成し、現在の進行状況を保存しました。", type="positive")
+            go("/account")
+
+        backend = account_backend_label()
+        with ui.element("div").classes("beginner-callout"):
+            with ui.row().classes("items-center gap-3 no-wrap"):
+                ui.icon("cloud_done", size="26px")
+                with ui.column().classes("gap-0"):
+                    ui.label(f"現在の保存先：{backend}").classes("font-bold")
+                    ui.label("同じユーザー名でログインすれば、別の端末でも進行状況を読み込めます。").classes("text-sm")
+
+        with ui.element("div").classes("account-auth-grid"):
+            with ui.card().classes("panel account-auth-card"):
+                section_heading("ログイン", "すでに作成したアカウントを使います。")
+                login_username = ui.input("ユーザー名").props(
+                    "outlined autocomplete=username maxlength=24"
+                ).classes("filter-control w-full mt-3")
+                login_password = ui.input(
+                    "パスワード", password=True, password_toggle_button=True
+                ).props("outlined autocomplete=current-password maxlength=256").classes("filter-control w-full")
+                primary_button("ログインして復元", icon="login", on_click=login)
+
+            with ui.card().classes("panel account-auth-card"):
+                section_heading("新規登録", "今のゲスト進行状況をそのまま保存します。")
+                register_username = ui.input("ユーザー名（半角3〜24文字）").props(
+                    "outlined autocomplete=username maxlength=24"
+                ).classes("filter-control w-full mt-3")
+                register_display_name = ui.input(
+                    "表示名", value=str(ensure_player_state(app.storage.user)["profile"]["display_name"])
+                ).props("outlined maxlength=20").classes("filter-control w-full")
+                register_password = ui.input(
+                    "パスワード（8文字以上）", password=True, password_toggle_button=True
+                ).props("outlined autocomplete=new-password maxlength=256").classes("filter-control w-full")
+                register_confirm = ui.input(
+                    "パスワードをもう一度", password=True, password_toggle_button=True
+                ).props("outlined autocomplete=new-password maxlength=256").classes("filter-control w-full")
+                primary_button("アカウントを作成", icon="person_add", on_click=register)
+
+
 @ui.page("/profile")
 def profile_page() -> None:
     with page_shell(
@@ -2798,8 +3625,8 @@ def profile_page() -> None:
                 ui.label(f"{battles}戦プレイ・{support_label}").classes("section-subtitle")
                 ui.label(f"ひとこと：{player['profile']['tagline'] or '未設定'}").classes("text-sm")
                 if selected_symbol:
-                    ui.label(f"プロフィール章：{selected_symbol.name}").classes("muted text-xs")
-                ui.label("オンライン対戦では表示名だけ相手に共有されます。").classes("muted text-xs")
+                    ui.label(f"アカウントアイコン：{selected_symbol.name}").classes("muted text-xs")
+                ui.label("オンライン対戦では表示名とアカウントアイコンを相手に共有します。").classes("muted text-xs")
             secondary_button("プロフィールを編集", icon="edit", on_click=profile_dialog.open)
 
         with ui.element("div").classes("metric-grid"):
@@ -2841,7 +3668,7 @@ def profile_page() -> None:
                             chip(f"熟練度 {min(10, favorite_uses)} / 10", "yellow")
                     ui.linear_progress(value=min(1, favorite_uses / 10)).props("rounded size=8px").classes("progress-track mt-4")
                 with ui.card().classes("panel"):
-                    section_heading("獲得した部隊章")
+                    section_heading("獲得した実績")
                     achievements: list[tuple[str, str]] = []
                     if battles >= 1:
                         achievements.append(("flag", "初陣"))
@@ -2852,7 +3679,7 @@ def profile_page() -> None:
                     if len(player["collection"]["unlocked_symbols"]) == len(SYMBOL_CATALOG):
                         achievements.append(("verified", "全記号収集"))
                     if not achievements:
-                        ui.label("対戦を完了すると、ここに部隊章が増えます。").classes("section-subtitle mt-3")
+                        ui.label("対戦を完了すると、ここに実績が増えます。").classes("section-subtitle mt-3")
                     with ui.row().classes("gap-3 mt-3"):
                         for icon, label in achievements:
                             with ui.column().classes("items-center gap-1"):
@@ -2881,7 +3708,8 @@ def settings_page() -> None:
         "/settings", "PREFERENCES", "設定",
         "説明の量や表示方法を、自分が遊びやすい状態に調整できます。",
     ):
-        preferences = get_preferences()
+        settings_player = ensure_player_state(app.storage.user)
+        preferences = dict(settings_player["preferences"])
 
         def set_choice(key: str, value: str, label: str) -> None:
             set_preference(key, value)
@@ -2893,7 +3721,14 @@ def settings_page() -> None:
             with ui.column().classes("w-full gap-4"):
                 with ui.card().classes("panel"):
                     section_heading("初心者サポート", "最初はすべてオンがおすすめです。")
-                    setting_switch("beginner_mode", "初心者モード", "カードの役割とおすすめ行動を常に表示します。")
+                    if settings_player["progression"]["simulation_unlocked"]:
+                        with ui.element("div").classes("beginner-callout beginner-callout--yellow"):
+                            ui.label("基本18枚を集めたため、初心者モードを修了しました").classes("font-bold")
+                            ui.label(
+                                "おすすめ行動や用語説明は個別に残せます。18枚ルールもカジュアルモードで遊べます。"
+                            ).classes("text-sm")
+                    else:
+                        setting_switch("beginner_mode", "初心者モード", "カードの役割とおすすめ行動を常に表示します。")
                     setting_switch("explain_military_terms", "軍事用語の説明", "専門用語の横に、普段の言葉で意味を表示します。")
                     setting_switch("recommended_actions", "おすすめ行動", "選べる行動に迷ったとき、候補を1つ表示します。")
                     setting_switch("slow_resolution", "結果を項目別に表示", "命令公開・索敵・補給・戦線判定を番号付きで表示します。")

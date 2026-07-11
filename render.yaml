@@ -14,3 +14,15 @@ services:
         generateValue: true
       - key: NICEGUI_RELOAD
         value: "false"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: command-grid-db
+          property: connectionString
+
+databases:
+  - name: command-grid-db
+    plan: free
+    region: singapore
+    databaseName: command_grid
+    user: command_grid
+    ipAllowList: []

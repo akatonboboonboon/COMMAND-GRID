@@ -25,6 +25,22 @@ from game_data import CARDS, CARD_INDEX, UnitCard
 
 
 @dataclass(frozen=True, slots=True)
+class LaneExercise:
+    """One selectable lane in a card tutorial's deployment exercise.
+
+    The power values describe the board *before* the featured card is placed.
+    ``situation`` carries information that cannot be expressed by power alone,
+    such as unrevealed enemies, available supply, or inactive support.
+    """
+
+    id: str
+    label: str
+    situation: str
+    player_power: int
+    enemy_power: int
+
+
+@dataclass(frozen=True, slots=True)
 class TutorialStage:
     """One small, independently readable step in a card tutorial.
 
@@ -41,6 +57,7 @@ class TutorialStage:
     choices: tuple[str, ...] = ()
     correct_choice: str = ""
     success_message: str = ""
+    exercise_lanes: tuple[LaneExercise, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +92,24 @@ class _Guide:
     choices: tuple[str, str, str]
     correct_choice: str
     success_message: str
+
+
+@dataclass(frozen=True, slots=True)
+class _DeploymentExercise:
+    question: str
+    lanes: tuple[LaneExercise, LaneExercise, LaneExercise]
+    correct_lane_id: str
+    success_message: str
+
+
+def _lane(
+    lane_id: str,
+    situation: str,
+    player_power: int,
+    enemy_power: int,
+) -> LaneExercise:
+    labels = {"left": "左戦線", "center": "中央戦線", "right": "右戦線"}
+    return LaneExercise(lane_id, labels[lane_id], situation, player_power, enemy_power)
 
 
 _GUIDES: dict[str, _Guide] = {
@@ -239,6 +274,190 @@ _GUIDES: dict[str, _Guide] = {
         ("味方制圧と補給需要がある同じ戦線", "誰もいない別戦線", "相手だけが制圧する戦線"),
         "味方制圧と補給需要がある同じ戦線",
         "正解です。同じ戦線の味方制圧が支援2を有効にし、補給4が味方需要を満たします。",
+    ),
+}
+
+
+_EXERCISES: dict[str, _DeploymentExercise] = {
+    "infantry_1": _DeploymentExercise(
+        "第1歩兵中隊で新しい足場を作り、今すぐ逆転できる戦線を選んでください。",
+        (
+            _lane("left", "味方はまだいません。敵の小部隊だけが確保しています。", 0, 3),
+            _lane("center", "歩兵と工兵で十分に確保済みです。", 8, 2),
+            _lane("right", "味方の偵察班だけで、敵主力との差が大きい場所です。", 1, 9),
+        ),
+        "left",
+        "左戦線が正解です。単独戦線力4を加えると0対3から4対3となり、新しい戦線を一枚で確保できます。",
+    ),
+    "infantry_2": _DeploymentExercise(
+        "市街地警備隊で、待機中の支援を生かして最も大きく逆転できる戦線を選んでください。",
+        (
+            _lane("left", "小差で負けていますが、ほかの味方支援はいません。", 2, 3),
+            _lane("center", "支援5の自走砲兵隊がいますが、制圧0のため支援が無効です。", 0, 7),
+            _lane("right", "すでに歩兵だけで安定して確保しています。", 7, 2),
+        ),
+        "center",
+        "中央戦線が正解です。制圧4が土台となり、待機していた支援5も有効になるため、戦線力9で逆転できます。",
+    ),
+    "infantry_3": _DeploymentExercise(
+        "空中機動歩兵班で、制圧のない偵察部隊を戦線力へ変えられる場所を選んでください。",
+        (
+            _lane("left", "味方歩兵がすでに余裕をもって確保しています。", 6, 1),
+            _lane("center", "敵主力が集中し、一枚では届かない差があります。", 1, 8),
+            _lane("right", "無人偵察隊の支援1がありますが、味方制圧は0です。", 0, 3),
+        ),
+        "right",
+        "右戦線が正解です。自身の制圧2と支援1に、偵察隊の支援1も有効となり、戦線力4で0対3を逆転できます。",
+    ),
+    "armor_1": _DeploymentExercise(
+        "第4機甲中隊を完全補給し、機甲ボーナスまで得られる戦線を選んでください。",
+        (
+            _lane("left", "補給2が余っており、味方の軽部隊が接戦を支えています。", 2, 8),
+            _lane("center", "補給は0です。機甲を置くと需要2が不足します。", 3, 5),
+            _lane("right", "補給はありますが、すでに大差で確保済みです。", 9, 1),
+        ),
+        "left",
+        "左戦線が正解です。需要2を満たすため、制圧5と機甲ボーナス2が加わり、2対8から9対8へ逆転します。",
+    ),
+    "armor_2": _DeploymentExercise(
+        "その戦線の総需要を確認し、機械化歩兵隊の需要1を満たしながら接戦を押し切れる場所を選んでください。",
+        (
+            _lane("left", "接戦ですが補給0で、配置すると機甲ボーナスを失います。", 4, 6),
+            _lane("center", "補給1が余っており、味方の土台も残っています。", 3, 9),
+            _lane("right", "すでに二枚の歩兵で確保しています。", 8, 2),
+        ),
+        "center",
+        "中央戦線が正解です。制圧4・支援1・機甲ボーナス2の計7が働き、3対9から10対9へ逆転できます。",
+    ),
+    "armor_3": _DeploymentExercise(
+        "重装甲突破隊の需要3を完全に満たし、その突破力が決着になる戦線を選んでください。",
+        (
+            _lane("left", "すでに砲兵支援で大きく勝っています。", 10, 3),
+            _lane("center", "補給0で、敵との差も大きい場所です。", 1, 8),
+            _lane("right", "補給3が余っており、味方の小部隊が踏みとどまっています。", 1, 8),
+        ),
+        "right",
+        "右戦線が正解です。需要3を満たして制圧6と機甲ボーナス2を得るため、1対8から9対8へ逆転できます。",
+    ),
+    "recon_1": _DeploymentExercise(
+        "前方偵察班で、次の命令に最も多くの情報を持ち帰れる戦線を選んでください。",
+        (
+            _lane("left", "相手の未確認部隊が3枚あり、味方は接戦中です。", 2, 4),
+            _lane("center", "相手カードはすべて確認済みです。", 5, 5),
+            _lane("right", "未確認部隊は1枚だけで、すでに確保しています。", 7, 2),
+        ),
+        "left",
+        "左戦線が正解です。偵察3で未確認部隊を最大3枚公開しつつ、制圧1も接戦へ加えられます。",
+    ),
+    "recon_2": _DeploymentExercise(
+        "無人偵察隊で四枚を偵察し、支援1も無駄にしない戦線を選んでください。",
+        (
+            _lane("left", "未確認部隊はなく、すでに味方が確保しています。", 8, 3),
+            _lane("center", "未確認部隊が4枚あり、味方歩兵の制圧4があります。", 4, 7),
+            _lane("right", "未確認部隊は1枚ですが、味方制圧は0です。", 0, 2),
+        ),
+        "center",
+        "中央戦線が正解です。最大4枚を公開でき、同じ戦線の制圧4によって自身の支援1も戦線力へ加わります。",
+    ),
+    "recon_3": _DeploymentExercise(
+        "電子偵察班で、情報と支援の両方を有効にできる戦線を選んでください。",
+        (
+            _lane("left", "相手はすべて確認済みで、情報を増やせません。", 4, 4),
+            _lane("center", "未確認部隊が2枚いますが、味方制圧は0です。", 0, 3),
+            _lane("right", "未確認部隊が3枚おり、味方工兵の制圧2があります。", 2, 5),
+        ),
+        "right",
+        "右戦線が正解です。偵察3で三枚を公開し、工兵の制圧を土台に支援1も有効化できます。",
+    ),
+    "artillery_1": _DeploymentExercise(
+        "野戦砲兵中隊の支援4と需要1を、どちらも正しく処理できる戦線を選んでください。",
+        (
+            _lane("left", "味方歩兵の制圧3と、余っている補給1があります。", 4, 7),
+            _lane("center", "補給1はありますが、味方制圧は0です。", 0, 3),
+            _lane("right", "制圧はありますが補給0で、すでに大差で確保済みです。", 9, 2),
+        ),
+        "left",
+        "左戦線が正解です。歩兵の制圧で支援4が有効になり、補給1で需要も満たすため、4対7から8対7へ逆転します。",
+    ),
+    "artillery_2": _DeploymentExercise(
+        "自走砲兵隊の支援5を不足なしで加え、中央の接戦を決める配置を選んでください。",
+        (
+            _lane("left", "補給0で味方制圧もなく、支援を生かせません。", 0, 2),
+            _lane("center", "味方制圧4と、余っている補給2があります。", 5, 9),
+            _lane("right", "補給2はありますが、すでに十分な差で確保しています。", 10, 3),
+        ),
+        "center",
+        "中央戦線が正解です。制圧の土台と補給2がそろっているため支援5をそのまま加え、10対9にできます。",
+    ),
+    "artillery_3": _DeploymentExercise(
+        "ロケット支援隊を、制圧・補給3・逆転余地の三条件がそろう戦線へ配備してください。",
+        (
+            _lane("left", "制圧はありますが、補給0で需要3が不足します。", 4, 6),
+            _lane("center", "補給3はありますが、味方制圧0で支援が無効です。", 0, 4),
+            _lane("right", "味方制圧2と補給3があり、あと少しで逆転できます。", 3, 8),
+        ),
+        "right",
+        "右戦線が正解です。制圧で支援6を有効にし、補給3で不足も防ぐため、3対8から9対8へ逆転できます。",
+    ),
+    "engineer_1": _DeploymentExercise(
+        "第2工兵中隊一枚で、新しい戦線を確保できる配置先を選んでください。",
+        (
+            _lane("left", "味方はまだおらず、敵の戦線力は3だけです。", 0, 3),
+            _lane("center", "歩兵と砲兵ですでに十分確保しています。", 9, 2),
+            _lane("right", "敵主力との差が大きく、一枚では届きません。", 1, 9),
+        ),
+        "left",
+        "左戦線が正解です。自身の制圧2が支援2を有効にするため、単独戦線力4で0対3を逆転できます。",
+    ),
+    "engineer_2": _DeploymentExercise(
+        "架橋工兵隊で、制圧のない味方支援までまとめて有効にできる戦線を選んでください。",
+        (
+            _lane("left", "歩兵がすでに戦線を安定して確保しています。", 7, 2),
+            _lane("center", "偵察隊の支援1がありますが、味方制圧は0です。", 0, 3),
+            _lane("right", "敵主力との差が大きく、支援する味方もいません。", 1, 8),
+        ),
+        "center",
+        "中央戦線が正解です。自身の制圧1・支援2に偵察隊の支援1も加わり、戦線力4で逆転できます。",
+    ),
+    "engineer_3": _DeploymentExercise(
+        "陣地構築隊で、止まっている支援を起動して接戦を取れる戦線を選んでください。",
+        (
+            _lane("left", "すでに機甲で大きく勝っています。", 9, 3),
+            _lane("center", "味方支援はなく、敵との差が一枚では届きません。", 0, 8),
+            _lane("right", "無人偵察隊の支援1がありますが、味方制圧は0です。", 0, 4),
+        ),
+        "right",
+        "右戦線が正解です。制圧1と自身の支援3に偵察隊の支援1も加わり、戦線力5で0対4を逆転できます。",
+    ),
+    "logistics_1": _DeploymentExercise(
+        "前線補給中隊で、補給不足と機甲ボーナス喪失を同時に解消できる戦線を選んでください。",
+        (
+            _lane("left", "第4機甲中隊が需要2を満たせず、補給不足のまま戦っています。", 3, 8),
+            _lane("center", "補給需要のない歩兵だけが接戦中です。", 4, 5),
+            _lane("right", "需要はなく、すでに砲兵支援で確保しています。", 9, 3),
+        ),
+        "left",
+        "左戦線が正解です。補給3で需要2を満たし、不足2を消して機甲ボーナス2を戻し、自身の戦線力2も加えて逆転できます。",
+    ),
+    "logistics_2": _DeploymentExercise(
+        "整備支援隊で、自走砲の補給不足を消しながら支援2も加えられる戦線を選んでください。",
+        (
+            _lane("left", "補給需要はなく、味方もいない空の戦線です。", 0, 2),
+            _lane("center", "歩兵と自走砲がいますが、需要2を満たせず不足しています。", 7, 11),
+            _lane("right", "補給需要はなく、すでに歩兵で確保済みです。", 8, 3),
+        ),
+        "center",
+        "中央戦線が正解です。補給3で不足2を解消し、歩兵の制圧により自身の支援2も有効となって、7対11から12対11へ逆転できます。",
+    ),
+    "logistics_3": _DeploymentExercise(
+        "戦域輸送隊の補給4を、一番多くの需要と支援へ変えられる戦線を選んでください。",
+        (
+            _lane("left", "補給需要は1だけで、味方制圧は0です。", 0, 2),
+            _lane("center", "需要はなく、すでに歩兵が確保しています。", 7, 4),
+            _lane("right", "味方制圧があり、機甲と砲兵の総需要4がすべて不足しています。", 6, 13),
+        ),
+        "right",
+        "右戦線が正解です。総需要4を満たして不足を消し、機甲ボーナスと自身の支援2まで有効にするため、逆転できます。",
     ),
 }
 
@@ -413,6 +632,11 @@ def _number_explanation(card: UnitCard) -> str:
 
 def _build_tutorial(card: UnitCard) -> CardTutorial:
     guide = _GUIDES[card.id]
+    exercise = _EXERCISES[card.id]
+    exercise_choices = tuple(lane.label for lane in exercise.lanes)
+    correct_lane = next(
+        lane for lane in exercise.lanes if lane.id == exercise.correct_lane_id
+    )
     stages = (
         TutorialStage(
             "role",
@@ -444,14 +668,15 @@ def _build_tutorial(card: UnitCard) -> CardTutorial:
         ),
         TutorialStage(
             "check",
-            "5. 最終確認",
-            "正しい一手を選べたら、このカードのチュートリアルは完了です。",
-            guide.caution,
-            "三択から一つ選んでください。間違えてもカードや報酬は失われません。",
-            question=guide.question,
-            choices=guide.choices,
-            correct_choice=guide.correct_choice,
-            success_message=guide.success_message,
+            "5. 実戦配備演習",
+            "三つの戦線を比較し、このカードを最も生かせる場所へ実際に配備します。",
+            f"盤面の戦線力だけでなく、次の条件も確認します。{guide.caution}",
+            "左・中央・右の状況を一つずつ読み、カードを配備する戦線を選んでください。間違えてもカードや報酬は失われません。",
+            question=exercise.question,
+            choices=exercise_choices,
+            correct_choice=correct_lane.label,
+            success_message=exercise.success_message,
+            exercise_lanes=exercise.lanes,
         ),
     )
     return CardTutorial(
@@ -545,6 +770,8 @@ def _validate_catalog() -> None:
     expected = set(CARD_INDEX)
     if set(_GUIDES) != expected:
         raise ValueError("Every card must have exactly one tutorial guide")
+    if set(_EXERCISES) != expected:
+        raise ValueError("Every card must have exactly one deployment exercise")
     if set(_DECK_SPECS) != expected:
         raise ValueError("Every card must have exactly one official deck")
     if len(TUTORIAL_INDEX) != len(CARD_TUTORIALS):
@@ -557,6 +784,13 @@ def _validate_catalog() -> None:
         check = tutorial.stages[-1]
         if not check.choices or check.correct_choice not in check.choices:
             raise ValueError(f"Tutorial {tutorial.card_id} has an invalid final check")
+        if check.id != "check" or len(check.exercise_lanes) != 3:
+            raise ValueError(f"Tutorial {tutorial.card_id} needs a three-lane exercise")
+        lane_ids = {lane.id for lane in check.exercise_lanes}
+        if lane_ids != {"left", "center", "right"}:
+            raise ValueError(f"Tutorial {tutorial.card_id} has invalid exercise lanes")
+        if tuple(lane.label for lane in check.exercise_lanes) != check.choices:
+            raise ValueError(f"Tutorial {tutorial.card_id} choices do not match its lanes")
     for deck in OFFICIAL_DECKS:
         if len(deck.card_ids) != 12 or len(set(deck.card_ids)) != 12:
             raise ValueError(f"Official deck {deck.id} must contain 12 unique cards")
@@ -575,6 +809,7 @@ __all__ = [
     "OFFICIAL_DECK_INDEX",
     "TUTORIAL_INDEX",
     "CardTutorial",
+    "LaneExercise",
     "OfficialDeck",
     "TutorialStage",
     "deck_missing_card_ids",

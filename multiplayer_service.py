@@ -45,7 +45,6 @@ from time import monotonic
 from typing import Any, Mapping, MutableMapping, Sequence
 from uuid import uuid4
 
-from game_data import CARDS
 from game_engine import (
     MAX_ROUNDS,
     GameState,
@@ -58,6 +57,7 @@ from game_engine import (
     resolve_round,
     submit_order,
 )
+from match_service import collection_rewards_for_outcome
 from player_state import (
     ensure_player_state,
     record_result,
@@ -65,7 +65,6 @@ from player_state import (
     update_deck,
     update_formation,
 )
-from symbol_catalog import SYMBOL_CATALOG
 
 
 PLAYER_TOKEN_KEY = "command_grid_player_token"
@@ -94,6 +93,7 @@ class PlayerSnapshot:
     deck: tuple[str, ...]
     formation: str
     name: str
+    icon_symbol_id: str
 
 
 @dataclass(slots=True)
@@ -475,15 +475,9 @@ def claim_result(storage: MutableMapping[str, Any]) -> dict[str, Any]:
             outcome = "win" if result.winner_id == player_id else "loss"
 
         state = ensure_player_state(storage)
-        collection = state["collection"]
-        owned_cards = set(collection["owned_cards"])
-        unlocked_symbols = set(collection["unlocked_symbols"])
-        reward_cards = [card.id for card in CARDS if card.id not in owned_cards][:1]
-        reward_symbols = [
-            symbol.id
-            for symbol in SYMBOL_CATALOG
-            if symbol.id not in unlocked_symbols
-        ][:12]
+        rewards = collection_rewards_for_outcome(state, outcome)
+        reward_cards = rewards["cards"]
+        reward_symbols = rewards["symbols"]
         updated = record_result(
             state,
             outcome,
@@ -574,7 +568,14 @@ def _make_snapshot(
 
     raw_name = name if name is not None else state["profile"]["display_name"]
     display_name = " ".join(str(raw_name).split())[:32] or "司令官"
-    return PlayerSnapshot(token, chosen_deck, chosen_formation, display_name)
+    icon_symbol_id = str(state["profile"]["selected_symbol"])
+    return PlayerSnapshot(
+        token,
+        chosen_deck,
+        chosen_formation,
+        display_name,
+        icon_symbol_id,
+    )
 
 
 def _start_match_locked(
@@ -711,8 +712,13 @@ def _match_view_locked(
         "formation": match.snapshots[token].formation,
         "submitted": player_id in match.game.orders,
         "result_claimed": token in match.claimed_tokens,
+        "player": {
+            "name": match.snapshots[token].name,
+            "icon_symbol_id": match.snapshots[token].icon_symbol_id,
+        },
         "opponent": {
             "name": match.snapshots[opponent].name,
+            "icon_symbol_id": match.snapshots[opponent].icon_symbol_id,
             "connected": match.connected[opponent],
             "left": opponent in match.left_tokens,
             "last_seen": match.last_seen[opponent],

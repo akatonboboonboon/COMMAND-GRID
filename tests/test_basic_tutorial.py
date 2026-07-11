@@ -39,6 +39,28 @@ class BasicTutorialTests(unittest.TestCase):
         self.assertIn("未確認", copy)
         self.assertIn("偵察", copy)
 
+    def test_course_teaches_the_nine_round_match_length(self) -> None:
+        full_copy = " ".join(
+            " ".join(
+                (
+                    lesson.title,
+                    lesson.plain_goal,
+                    lesson.explanation,
+                    lesson.task,
+                    lesson.success_message,
+                    lesson.hint,
+                    *(label for _, label in lesson.choices),
+                )
+            )
+            for lesson in BASIC_TUTORIAL_LESSONS
+        )
+        rounds = get_basic_lesson("rounds")
+        self.assertEqual(rounds.correct_choice, "nine")
+        self.assertEqual(dict(rounds.choices)["nine"], "9枚")
+        self.assertIn("9ラウンド", full_copy)
+        self.assertNotIn("6ラウンド", full_copy)
+        self.assertNotIn("最低6枚", full_copy)
+
 
 if __name__ == "__main__":
     unittest.main()

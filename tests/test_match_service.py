@@ -2,11 +2,12 @@ import json
 import unittest
 
 from game_data import CARDS
-from game_engine import Phase
+from game_engine import MAX_ROUNDS, Phase
 from match_service import (
     ACTIVE_MATCH_KEY,
     RECORDED_MATCH_IDS_KEY,
     abandon_match,
+    collection_rewards_for_outcome,
     get_match_context,
     load_match,
     play_player_round,
@@ -43,6 +44,7 @@ class MatchServiceTests(unittest.TestCase):
         self.assertEqual(context["mode"], "ranked")
         self.assertEqual(context["formation"], "division")
         self.assertEqual(context["deck"], storage[PLAYER_STATE_KEY]["deck"])
+        self.assertEqual(started.max_rounds, MAX_ROUNDS)
         self.assertEqual(loaded.to_dict(), started.to_dict())
         self.assertEqual(start_match(storage).game_id, started.game_id)
         json.dumps(storage[ACTIVE_MATCH_KEY], ensure_ascii=False)
@@ -89,15 +91,10 @@ class MatchServiceTests(unittest.TestCase):
 
     def test_completion_unlocks_ordered_progress_rewards_once(self) -> None:
         storage = self.make_storage()
-        before = storage[PLAYER_STATE_KEY]["collection"]
-        expected_cards = [
-            card.id for card in CARDS if card.id not in set(before["owned_cards"])
-        ][:1]
-        expected_symbols = [
-            symbol.id
-            for symbol in SYMBOL_CATALOG
-            if symbol.id not in set(before["unlocked_symbols"])
-        ][:12]
+        expected_by_outcome = {
+            outcome: collection_rewards_for_outcome(storage[PLAYER_STATE_KEY], outcome)
+            for outcome in ("win", "draw", "loss")
+        }
         state = start_match(storage)
 
         while state.phase is not Phase.COMPLETE:
@@ -105,11 +102,15 @@ class MatchServiceTests(unittest.TestCase):
             state, _ = play_player_round(storage, card_id, "right")
 
         context = get_match_context(storage)
-        self.assertEqual(context["rewards"]["cards"], expected_cards)
-        self.assertEqual(context["rewards"]["symbols"], expected_symbols)
+        if state.result.winner_id is None:
+            outcome = "draw"
+        else:
+            outcome = "win" if state.result.winner_id == "player" else "loss"
+        expected = expected_by_outcome[outcome]
+        self.assertEqual(context["rewards"], expected)
         collection = storage[PLAYER_STATE_KEY]["collection"]
-        self.assertTrue(set(expected_cards).issubset(collection["owned_cards"]))
-        self.assertTrue(set(expected_symbols).issubset(collection["unlocked_symbols"]))
+        self.assertTrue(set(expected["cards"]).issubset(collection["owned_cards"]))
+        self.assertTrue(set(expected["symbols"]).issubset(collection["unlocked_symbols"]))
 
         owned_after = list(collection["owned_cards"])
         symbols_after = list(collection["unlocked_symbols"])
@@ -123,6 +124,31 @@ class MatchServiceTests(unittest.TestCase):
         )
         self.assertEqual(storage[PLAYER_STATE_KEY]["stats"]["battles_played"], 1)
         json.dumps(storage[ACTIVE_MATCH_KEY], ensure_ascii=False)
+
+    def test_reward_policy_varies_by_outcome_and_stops_when_exhausted(self) -> None:
+        state = default_player_state()
+        win = collection_rewards_for_outcome(state, "win")
+        draw = collection_rewards_for_outcome(state, "draw")
+        loss = collection_rewards_for_outcome(state, "loss")
+
+        self.assertEqual(len(win["cards"]), 1)
+        self.assertEqual(len(win["symbols"]), 12)
+        self.assertEqual(draw["cards"], [])
+        self.assertEqual(len(draw["symbols"]), 3)
+        self.assertEqual(loss["cards"], [])
+        self.assertEqual(len(loss["symbols"]), 1)
+
+        state["collection"]["owned_cards"] = [card.id for card in CARDS]
+        state["collection"]["unlocked_symbols"] = [
+            symbol.id for symbol in SYMBOL_CATALOG
+        ]
+        for outcome in ("win", "draw", "loss"):
+            self.assertEqual(
+                collection_rewards_for_outcome(state, outcome),
+                {"cards": [], "symbols": []},
+            )
+        with self.assertRaises(ValueError):
+            collection_rewards_for_outcome(state, "abandoned")
 
     def test_abandon_and_restart_have_clear_lifecycle(self) -> None:
         storage = self.make_storage()

@@ -2,8 +2,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from game_data import CARDS
-from game_engine import RuleViolation
+from game_engine import MAX_ROUNDS, RuleViolation
 from multiplayer_service import (
     MultiplayerError,
     cancel_waiting,
@@ -23,6 +22,7 @@ from player_state import (
     ensure_player_state,
     store_player_state,
     update_profile,
+    update_selected_symbol,
 )
 from symbol_catalog import SYMBOL_CATALOG
 
@@ -47,22 +47,18 @@ class MultiplayerServiceTests(unittest.TestCase):
         player_id = view["player_id"]
         return view["game"]["players"][player_id]["hand"][0]
 
-    def test_queue_six_rounds_and_each_result_is_claimed_once(self) -> None:
+    def test_queue_nine_rounds_and_each_result_is_claimed_once(self) -> None:
         initial = ensure_player_state(self.alice)
-        expected_cards = [
-            card.id
-            for card in CARDS
-            if card.id not in set(initial["collection"]["owned_cards"])
-        ][:1]
+        expected_cards: list[str] = []
         expected_symbols = [
             symbol.id
             for symbol in SYMBOL_CATALOG
             if symbol.id not in set(initial["collection"]["unlocked_symbols"])
-        ][:12]
+        ][:3]
         alice_view, bob_view = self._pair("ranked")
         self.assertNotEqual(ensure_player_token(self.alice), ensure_player_token(self.bob))
 
-        for round_no in range(1, 7):
+        for round_no in range(1, MAX_ROUNDS + 1):
             alice_view = poll(self.alice)
             bob_view = poll(self.bob)
             self.assertEqual(alice_view["game"]["round_no"], round_no)
@@ -75,6 +71,8 @@ class MultiplayerServiceTests(unittest.TestCase):
         bob_claim = claim_result(self.bob)
         self.assertTrue(alice_claim["claimed"])
         self.assertTrue(bob_claim["claimed"])
+        self.assertEqual(alice_claim["outcome"], "draw")
+        self.assertEqual(bob_claim["outcome"], "draw")
         self.assertEqual(alice_claim["stats"]["battles_played"], 1)
         self.assertEqual(bob_claim["stats"]["battles_played"], 1)
         self.assertEqual(alice_claim["history_entry"]["mode"], "ranked")
@@ -122,10 +120,20 @@ class MultiplayerServiceTests(unittest.TestCase):
     def test_default_match_name_comes_from_player_profile(self) -> None:
         state = ensure_player_state(self.alice)
         state = update_profile(state, display_name="Profile Alice")
+        selected_symbol = state["collection"]["unlocked_symbols"][-1]
+        state = update_selected_symbol(state, selected_symbol)
         store_player_state(self.alice, state)
         room = create_friend_room(self.alice)
         join_friend_room(self.bob, room["room_code"])
-        self.assertEqual(poll(self.bob)["opponent"]["name"], "Profile Alice")
+        bob_view = poll(self.bob)
+        alice_view = poll(self.alice)
+        self.assertEqual(bob_view["opponent"]["name"], "Profile Alice")
+        self.assertEqual(bob_view["opponent"]["icon_symbol_id"], selected_symbol)
+        self.assertEqual(alice_view["player"]["icon_symbol_id"], selected_symbol)
+        self.assertEqual(
+            alice_view["opponent"]["icon_symbol_id"],
+            bob_view["player"]["icon_symbol_id"],
+        )
 
     def test_pending_order_and_opponent_secrets_are_redacted(self) -> None:
         alice_view, _ = self._pair()
@@ -171,6 +179,13 @@ class MultiplayerServiceTests(unittest.TestCase):
         bob_result = claim_result(self.bob)
         self.assertTrue(bob_result["claimed"])
         self.assertEqual(bob_result["outcome"], "win")
+        self.assertEqual(len(bob_result["rewards"]["cards"]), 1)
+        self.assertEqual(len(bob_result["rewards"]["symbols"]), 12)
+        alice_result = claim_result(self.alice)
+        self.assertTrue(alice_result["claimed"])
+        self.assertEqual(alice_result["outcome"], "loss")
+        self.assertEqual(alice_result["rewards"]["cards"], [])
+        self.assertEqual(len(alice_result["rewards"]["symbols"]), 1)
         with self.assertRaises(MultiplayerError) as context:
             submit_player_order(self.bob, self._first_card(opponent_view), "left")
         self.assertEqual(context.exception.code, "opponent_left")
@@ -204,7 +219,7 @@ class MultiplayerServiceTests(unittest.TestCase):
 
     def test_close_completed_session_auto_claims_before_next_match(self) -> None:
         self._pair()
-        for _ in range(6):
+        for _ in range(MAX_ROUNDS):
             alice_view = poll(self.alice)
             bob_view = poll(self.bob)
             submit_player_order(self.alice, self._first_card(alice_view), "left")

@@ -2,11 +2,11 @@
 
 The engine intentionally keeps the first playable ruleset small:
 
-* two players, three lanes and six rounds;
+* two players, three lanes and nine rounds;
 * each player secretly assigns one card to one lane each round;
 * orders resolve as deploy -> recon -> supply/support/control -> scoring;
 * a player earns one mission point for every lane they lead each round;
-* after round six, controlling more of the three lanes decides the winner;
+* after round nine, controlling more of the three lanes decides the winner;
 * mission points break a tied lane count, and equal points are a draw.
 
 All mutations happen through the functions in this module.  NiceGUI, an API,
@@ -30,7 +30,7 @@ LANE_LABELS: dict[str, str] = {
     "center": "中央",
     "right": "右翼",
 }
-MAX_ROUNDS = 6
+MAX_ROUNDS = 9
 MISSION_POINTS_PER_LANE = 1
 ARMOR_SUPPLY_BONUS = 2
 
@@ -756,12 +756,73 @@ def calculate_lane_power(
     )
 
 
-def choose_ai_order(state: GameState, player_id: str) -> Order:
-    """Choose a legal order with a stable, deterministic heuristic.
+def _project_lane_power(current: LanePower, card: UnitCard) -> LanePower:
+    """Calculate the lane power after adding ``card`` without mutating state."""
 
-    The AI uses only deployments visible to it. It values lanes it is losing,
-    recon when enemy cards are hidden, supply beside armor, and support behind
-    a front line. Equal choices preserve hand order and left/center/right order.
+    control = current.control + card.control
+    support = current.support + card.support
+    generated = current.supply_generated + max(0, card.supply)
+    demand = current.supply_demand + abs(min(0, card.supply))
+    deficit = max(0, demand - generated)
+    armor_branch = lookup_card("armor_1").branch
+    armor_count = current.armor_count + int(card.branch == armor_branch)
+    active_support = support if control > 0 else 0
+    armor_bonus = ARMOR_SUPPLY_BONUS * armor_count if armor_count and generated >= demand else 0
+    total = max(0, control + active_support + armor_bonus - deficit)
+    return LanePower(
+        control=control,
+        support=support,
+        active_support=active_support,
+        recon=current.recon + card.recon,
+        supply_generated=generated,
+        supply_demand=demand,
+        supply_deficit=deficit,
+        armor_count=armor_count,
+        armor_supply_bonus=armor_bonus,
+        total=total,
+    )
+
+
+def _estimated_enemy_power(
+    state: GameState,
+    lane_id: str,
+    player_id: str,
+    opponent_id: str,
+) -> tuple[float, int]:
+    """Estimate a hidden enemy lane using only information available to the AI.
+
+    The public winner of the previous round gives a useful upper/lower bound,
+    while every still-hidden deployment contributes a conservative estimate.
+    No card identity or pending opponent order is inspected.
+    """
+
+    lane = state.lanes[lane_id]
+    own = calculate_lane_power(state, lane_id, player_id)
+    seen = calculate_lane_power(state, lane_id, opponent_id, visible_to=player_id)
+    hidden_count = sum(
+        deployment.player_id == opponent_id and not deployment.visible_to(player_id)
+        for deployment in lane.deployments
+    )
+    estimate = float(seen.total) + hidden_count * 3.0
+    latest_winner = lane.round_winners[-1] if lane.round_winners else None
+    if latest_winner == opponent_id:
+        estimate = max(estimate, float(own.total + 1))
+    elif latest_winner == player_id:
+        estimate = min(estimate, float(max(0, own.total - 1)))
+    elif lane.round_winners:
+        estimate = float(own.total)
+    return estimate, hidden_count
+
+
+def choose_ai_order(state: GameState, player_id: str) -> Order:
+    """Choose a legal order with a stable, multi-front heuristic.
+
+    The AI aims to finish with at least two lanes instead of repeatedly adding
+    power to one safe lane. It weighs the easiest lane to capture, threatened
+    lanes it already controls, visible and inferred enemy pressure, remaining
+    rounds, and the actual power gained by supply/support combinations. Recon
+    is valued only where hidden enemy deployments can be revealed. Equal
+    choices preserve hand order and left/center/right order.
     """
 
     _require(state.phase is Phase.PLANNING, "wrong_phase", "AIは現在命令を選べません。")
@@ -770,25 +831,78 @@ def choose_ai_order(state: GameState, player_id: str) -> Order:
     _require(bool(player.hand), "empty_hand", "AIの手札がありません。")
     opponent_id = _opponent_id(state, player_id)
 
+    latest_winners = {
+        lane_id: (
+            state.lanes[lane_id].round_winners[-1]
+            if state.lanes[lane_id].round_winners
+            else None
+        )
+        for lane_id in LANE_IDS
+    }
+    controlled_count = sum(winner == player_id for winner in latest_winners.values())
+    own_deployment_counts = {
+        lane_id: sum(
+            deployment.player_id == player_id
+            for deployment in state.lanes[lane_id].deployments
+        )
+        for lane_id in LANE_IDS
+    }
+    least_committed = min(own_deployment_counts.values())
+    remaining_rounds = state.max_rounds - state.round_no + 1
+    endgame_weight = 1.6 if remaining_rounds <= 3 else 1.0
+
     best: tuple[float, str, str] | None = None
     for card_id in player.hand:
         card = lookup_card(card_id)
         for lane_id in LANE_IDS:
             lane = state.lanes[lane_id]
             own = calculate_lane_power(state, lane_id, player_id)
-            seen_enemy = calculate_lane_power(state, lane_id, opponent_id, visible_to=player_id)
-            hidden_enemy = sum(
-                deployment.player_id == opponent_id and not deployment.visible_to(player_id)
-                for deployment in lane.deployments
+            enemy_estimate, hidden_enemy = _estimated_enemy_power(
+                state, lane_id, player_id, opponent_id
             )
-            urgency = max(0, seen_enemy.total - own.total) * 1.5
-            front_support = card.support if own.control > 0 or card.control > 0 else 0
-            recon_value = min(card.recon, hidden_enemy) * 2.0
-            supply_value = 0.0
-            if card.supply > 0 and (own.supply_demand > own.supply_generated or own.armor_count):
-                supply_value = 4.0
-            armor_value = 2.0 if card.branch == "機甲" and own.supply_generated > 0 else 0.0
-            score = card.control + front_support + recon_value + supply_value + armor_value + urgency
+            projected = _project_lane_power(own, card)
+            power_gain = projected.total - own.total
+            current_winner = latest_winners[lane_id]
+            before_margin = own.total - enemy_estimate
+            projected_margin = projected.total - enemy_estimate
+
+            # Actual lane-power gain naturally captures front-line support,
+            # fixing a supply deficit, and the fully-supplied armor bonus.
+            score = power_gain * 2.0
+            score += min(card.recon, hidden_enemy) * 2.5
+
+            if current_winner != player_id:
+                # With fewer than two lanes, opening/capturing another front is
+                # the primary objective. Prefer a reachable lane over a hopeless
+                # attempt to match a heavily fortified enemy lane.
+                score += (9.0 if controlled_count < 2 else 3.0) * endgame_weight
+                score += max(0.0, 6.0 - abs(before_margin))
+                if projected_margin > 0:
+                    score += 7.0 * endgame_weight
+                else:
+                    score += min(float(power_gain), max(0.0, -before_margin))
+                    score -= max(0.0, -projected_margin - 5.0) * 0.8
+            else:
+                # Defend a narrow lead, especially when exactly two lanes are
+                # held. A safe lane with a large surplus receives little value.
+                if before_margin <= 3:
+                    score += (6.0 if controlled_count <= 2 else 3.0) * endgame_weight
+                    score += max(0.0, 4.0 - before_margin)
+                elif controlled_count <= 2 and remaining_rounds <= 3:
+                    score += 2.0
+                score -= max(0.0, before_margin - 4.0) * 1.4
+
+            enemy_deployments = sum(
+                deployment.player_id == opponent_id for deployment in lane.deployments
+            )
+            score += min(enemy_deployments, 4) * (0.7 if before_margin <= 3 else 0.2)
+
+            # Avoid piling cards into the most occupied or already overpowered
+            # lane when another front can still contribute to a two-lane win.
+            excess_commitment = own_deployment_counts[lane_id] - least_committed
+            score -= excess_commitment * 1.8
+            score -= max(0.0, projected_margin - 7.0) * 0.6
+
             if best is None or score > best[0]:
                 best = (score, card_id, lane_id)
 

@@ -3,6 +3,7 @@ import unittest
 
 from game_engine import (
     GameState,
+    MAX_ROUNDS,
     Phase,
     RuleViolation,
     calculate_lane_power,
@@ -23,6 +24,9 @@ PLAYER_DECK = [
     "logistics_1",
     "engineer_1",
     "artillery_1",
+    "recon_1",
+    "armor_2",
+    "engineer_2",
 ]
 OPPONENT_DECK = [
     "recon_2",
@@ -31,6 +35,9 @@ OPPONENT_DECK = [
     "artillery_2",
     "logistics_2",
     "armor_2",
+    "infantry_1",
+    "armor_1",
+    "artillery_1",
 ]
 
 
@@ -47,9 +54,9 @@ class GameEngineTests(unittest.TestCase):
             **kwargs,
         )
 
-    def test_full_six_round_match_produces_winner_and_serializable_result(self) -> None:
-        winning_deck = ["infantry_2"] * 6
-        losing_deck = ["recon_2"] * 6
+    def test_full_nine_round_match_produces_winner_and_serializable_result(self) -> None:
+        winning_deck = ["infantry_2"] * MAX_ROUNDS
+        losing_deck = ["recon_2"] * MAX_ROUNDS
         state = new_game(
             winning_deck,
             losing_deck,
@@ -58,43 +65,43 @@ class GameEngineTests(unittest.TestCase):
             game_id="full-match",
         )
 
-        for _ in range(6):
+        for _ in range(MAX_ROUNDS):
             submit_order(state, "p1", "infantry_2", "center")
             submit_order(state, "p2", "recon_2", "left")
             resolution = resolve_round(state)
 
         self.assertTrue(resolution.match_complete)
         self.assertEqual(state.phase, Phase.COMPLETE)
-        self.assertEqual(state.round_no, 6)
+        self.assertEqual(state.round_no, MAX_ROUNDS)
         self.assertIsNotNone(state.result)
         self.assertEqual(state.result.outcome, "win")
         self.assertEqual(state.result.winner_id, "p1")
-        self.assertEqual(state.players["p1"].mission_points, 6)
+        self.assertEqual(state.players["p1"].mission_points, MAX_ROUNDS)
         self.assertEqual(state.players["p2"].mission_points, 0)
         restored = GameState.from_dict(json.loads(json.dumps(state.to_dict(), ensure_ascii=False)))
         self.assertEqual(restored.to_dict(), state.to_dict())
 
     def test_final_two_lane_control_takes_priority_over_accumulated_points(self) -> None:
         state = new_game(
-            ["infantry_2"] * 4 + ["recon_2"] * 2,
-            ["recon_2"] * 4 + ["infantry_2"] * 2,
+            ["infantry_2"] * 6 + ["recon_2"] * 3,
+            ["recon_2"] * 6 + ["infantry_2"] * 3,
             player_id="p1",
             opponent_id="p2",
             game_id="lane-control-win",
         )
 
-        for round_index in range(6):
+        for round_index in range(MAX_ROUNDS):
             submit_order(
                 state,
                 "p1",
-                "infantry_2" if round_index < 4 else "recon_2",
+                "infantry_2" if round_index < 6 else "recon_2",
                 "center",
             )
             submit_order(
                 state,
                 "p2",
-                "recon_2" if round_index < 4 else "infantry_2",
-                "left" if round_index < 5 else "right",
+                "recon_2" if round_index < 6 else "infantry_2",
+                "left" if round_index < 8 else "right",
             )
             resolve_round(state)
 
@@ -133,8 +140,8 @@ class GameEngineTests(unittest.TestCase):
         self.assertIn("不戦勝", result.summary)
 
     def test_recon_reveals_hidden_enemy_deployment_only_to_scout(self) -> None:
-        player_deck = ["recon_1", *PLAYER_DECK[:5]]
-        opponent_deck = ["infantry_1", *OPPONENT_DECK[:5]]
+        player_deck = ["recon_1", *PLAYER_DECK[:8]]
+        opponent_deck = ["infantry_1", *OPPONENT_DECK[:8]]
         state = new_game(
             player_deck,
             opponent_deck,
@@ -230,6 +237,65 @@ class GameEngineTests(unittest.TestCase):
         played = play_ai_turn(state, "p2")
         self.assertEqual(played.to_dict(), first.to_dict())
         self.assertIn(played.card_id, OPPONENT_DECK)
+
+    def test_ai_opens_multiple_fronts_instead_of_stacking_one_lane(self) -> None:
+        state = new_game(
+            ["infantry_2"] * MAX_ROUNDS,
+            ["infantry_2"] * MAX_ROUNDS,
+            player_id="p1",
+            opponent_id="p2",
+            game_id="ai-distribution",
+        )
+        chosen_lanes: list[str] = []
+
+        for _ in range(5):
+            submit_order(state, "p1", "infantry_2", "left")
+            order = choose_ai_order(state, "p2")
+            chosen_lanes.append(order.lane_id)
+            submit_order(state, "p2", order.card_id, order.lane_id)
+            resolve_round(state)
+
+        self.assertEqual(set(chosen_lanes[:3]), {"left", "center", "right"})
+        controlled = {
+            lane_id
+            for lane_id, lane in state.lanes.items()
+            if lane.round_winners[-1] == "p2"
+        }
+        self.assertGreaterEqual(len(controlled), 2)
+
+    def test_ai_uses_supply_synergy_after_establishing_two_lanes(self) -> None:
+        state = new_game(
+            ["infantry_2"] * MAX_ROUNDS,
+            ["armor_1", "infantry_2", "logistics_1", *(["recon_2"] * 6)],
+            player_id="p1",
+            opponent_id="p2",
+            game_id="ai-supply",
+        )
+        for ai_card, ai_lane in (("armor_1", "center"), ("infantry_2", "right")):
+            submit_order(state, "p1", "infantry_2", "left")
+            submit_order(state, "p2", ai_card, ai_lane)
+            resolve_round(state)
+
+        order = choose_ai_order(state, "p2")
+
+        self.assertEqual((order.card_id, order.lane_id), ("logistics_1", "center"))
+
+    def test_ai_sends_recon_to_the_hidden_enemy_threat(self) -> None:
+        state = new_game(
+            ["infantry_2"] * MAX_ROUNDS,
+            ["infantry_2", "infantry_1", "recon_1", *(["recon_2"] * 6)],
+            player_id="p1",
+            opponent_id="p2",
+            game_id="ai-recon",
+        )
+        for ai_card, ai_lane in (("infantry_2", "right"), ("infantry_1", "left")):
+            submit_order(state, "p1", "infantry_2", "center")
+            submit_order(state, "p2", ai_card, ai_lane)
+            resolve_round(state)
+
+        order = choose_ai_order(state, "p2")
+
+        self.assertEqual((order.card_id, order.lane_id), ("recon_1", "center"))
 
     def test_division_formation_metadata_and_default_hand_are_available(self) -> None:
         state = self.make_game()
