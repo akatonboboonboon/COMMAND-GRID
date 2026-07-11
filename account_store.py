@@ -34,6 +34,7 @@ PASSWORD_SALT_BYTES = 32
 PASSWORD_HASH_BYTES = 32
 SESSION_TOKEN_BYTES = 48
 SESSION_LIFETIME = timedelta(days=30)
+POSTGRES_CONNECT_TIMEOUT_SECONDS = 5
 
 MIN_PASSWORD_LENGTH = 8
 MAX_PASSWORD_LENGTH = 256
@@ -185,7 +186,10 @@ class AccountStore:
             try:
                 assert self._psycopg is not None
                 assert self._database_url is not None
-                with self._psycopg.connect(self._database_url) as connection:
+                with self._psycopg.connect(
+                    self._database_url,
+                    connect_timeout=POSTGRES_CONNECT_TIMEOUT_SECONDS,
+                ) as connection:
                     yield connection
             except AccountStoreError:
                 raise

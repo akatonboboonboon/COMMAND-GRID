@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import main
 
@@ -38,7 +39,12 @@ class UiRouteTests(unittest.TestCase):
         self.assertNotIn("/legacy-battle", paths)
 
     def test_health_check_payload(self) -> None:
-        self.assertEqual(main.healthz(), {"status": "ok"})
+        with patch.object(
+            main,
+            "get_default_account_store",
+            side_effect=AssertionError("health check must not wait for the database"),
+        ):
+            self.assertEqual(main.healthz(), {"status": "ok"})
 
     def test_every_card_face_uses_the_same_four_primary_combat_stats(self) -> None:
         expected_labels = ["制圧", "支援", "偵察", "補給"]

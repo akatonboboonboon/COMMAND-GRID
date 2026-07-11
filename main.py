@@ -248,9 +248,8 @@ def set_preference(key: str, value: object) -> None:
 
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
-    # Render must only consider the service healthy after persistent account
-    # storage has been configured and initialized successfully.
-    get_default_account_store()
+    # Keep deployment health independent from a sleeping or provisioning DB.
+    # Account operations still fail safely instead of using ephemeral storage.
     return {"status": "ok"}
 
 

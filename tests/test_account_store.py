@@ -8,10 +8,11 @@ import unittest
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from account_store import (
     PBKDF2_ITERATIONS,
+    POSTGRES_CONNECT_TIMEOUT_SECONDS,
     SESSION_LIFETIME,
     AccountConfigurationError,
     AccountDatabaseError,
@@ -279,6 +280,22 @@ class AccountStoreTests(unittest.TestCase):
 
             explicit_test_store = AccountStore(sqlite_path=":memory:")
             explicit_test_store.close()
+
+    def test_postgresql_connections_have_a_short_timeout(self) -> None:
+        postgres_store = object.__new__(AccountStore)
+        postgres_store.backend = "postgresql"
+        postgres_store._database_url = "postgresql://example.invalid/command_grid"
+        postgres_store._psycopg = MagicMock()
+        connection = MagicMock()
+        postgres_store._psycopg.connect.return_value.__enter__.return_value = connection
+
+        with postgres_store._connection() as yielded:
+            self.assertIs(yielded, connection)
+
+        postgres_store._psycopg.connect.assert_called_once_with(
+            postgres_store._database_url,
+            connect_timeout=POSTGRES_CONNECT_TIMEOUT_SECONDS,
+        )
 
     def test_long_username_can_supply_the_default_display_name(self) -> None:
         account = self.store.register("Abcdefghijklmnopqrstuvwx", "secure password")
