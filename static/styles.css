@@ -899,6 +899,7 @@ a:focus-visible {
 }
 
 .deck-row {
+  flex: 0 0 auto;
   width: 100%;
   min-height: 76px;
   padding: 14px;
@@ -1014,9 +1015,31 @@ a:focus-visible {
 }
 
 .lane-header {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start !important;
+  justify-content: flex-start !important;
+  gap: 8px;
   width: 100%;
+  min-height: 82px;
   padding-bottom: 10px;
   border-bottom: 1px solid var(--line);
+}
+
+.lane-header .status-chip {
+  margin: 0;
+}
+
+.deck-row .card-stats {
+  margin-top: 7px;
+}
+
+.deck-row .card-stat {
+  padding: 5px 3px;
+}
+
+.deck-row .card-stat__value {
+  font-size: 14px;
 }
 
 .unknown-unit {

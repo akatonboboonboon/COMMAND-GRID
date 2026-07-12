@@ -638,6 +638,7 @@ def lazy_card_detail_opener(card: UnitCard) -> Callable[[], None]:
 
 
 def unit_card(card: UnitCard, *, selected: bool = False,
+              status_label: str | None = None,
               action_label: str = "詳しく見る", action: Callable | None = None) -> None:
     handler = action if action is not None else lazy_card_detail_opener(card)
     classes = "unit-card"
@@ -650,6 +651,8 @@ def unit_card(card: UnitCard, *, selected: bool = False,
             with ui.column().classes("gap-0 min-w-0"):
                 ui.label(card.branch).classes("unit-card__branch")
                 ui.label(card.name).classes("unit-card__name")
+            if status_label:
+                chip(status_label, "green")
         with ui.element("div").classes("unit-card__symbol-area"):
             unit_symbol(card)
         ui.label(card.tagline).classes("unit-card__tagline")
@@ -678,7 +681,7 @@ def role_card(role: str) -> None:
             ui.label(info["note"]).classes("section-subtitle px-2 pb-2")
 
 
-def beginner_card(card: UnitCard) -> None:
+def beginner_card(card: UnitCard, *, status_label: str | None = None) -> None:
     """A low-information card used before the player opens full details."""
     open_detail = lazy_card_detail_opener(card)
     info = ROLE_INFO[card.branch]
@@ -686,7 +689,10 @@ def beginner_card(card: UnitCard) -> None:
         with ui.row().classes("w-full items-center gap-4 no-wrap"):
             unit_symbol(card)
             with ui.column().classes("gap-1 min-w-0 flex-1"):
-                ui.label(card.branch).classes("page-eyebrow")
+                with ui.row().classes("items-center gap-2"):
+                    ui.label(card.branch).classes("page-eyebrow")
+                    if status_label:
+                        chip(status_label, "green")
                 ui.label(info["verb"]).classes("text-xl font-bold")
                 ui.label(info["plain"]).classes("section-subtitle")
         ui.button("このカードだけ詳しく見る", icon="arrow_forward", on_click=open_detail).props(
@@ -840,7 +846,7 @@ def card_tutorial_tile(tutorial: CardTutorial, player: dict[str, object]) -> Non
 
 @contextmanager
 def page_shell(active: str, eyebrow: str, title: str, subtitle: str) -> Iterator[None]:
-    ui.add_head_html('<link rel="stylesheet" href="/static/styles.css?v=20260712-1">')
+    ui.add_head_html('<link rel="stylesheet" href="/static/styles.css?v=20260712-3">')
     ui.colors(
         primary="#60AFFF",
         secondary="#55C7D9",
@@ -2135,6 +2141,7 @@ def cards_page() -> None:
     ):
         player = ensure_player_state(app.storage.user)
         owned_cards = set(player["collection"]["owned_cards"])
+        deck_ids = set(player["deck"])
         with ui.element("div").classes("focus-banner"):
             with ui.row().classes("items-start gap-3 no-wrap"):
                 ui.icon("lightbulb", size="26px")
@@ -2145,7 +2152,10 @@ def cards_page() -> None:
         core_cards = [next(card for card in CARDS if card.branch == role and card.id in owned_cards) for role in ROLE_INFO]
         with ui.element("div").classes("beginner-card-grid"):
             for card in core_cards:
-                beginner_card(card)
+                beginner_card(
+                    card,
+                    status_label="編制中" if card.id in deck_ids else None,
+                )
 
         with ui.card().classes("panel collection-next"):
             with ui.row().classes("w-full items-center justify-between gap-4"):
@@ -2279,6 +2289,7 @@ def advanced_cards_page() -> None:
     ):
         player = ensure_player_state(app.storage.user)
         owned_cards = set(player["collection"]["owned_cards"])
+        deck_ids = set(player["deck"])
         unlocked_symbols = set(player["collection"]["unlocked_symbols"])
         with ui.element("div").classes("metric-grid"):
             metric_card("ゲームカード", f"{len(owned_cards)} / {len(CARDS)}", "対戦完了ごとに1枚解放", "blue-text")
@@ -2330,7 +2341,12 @@ def advanced_cards_page() -> None:
                 return
             with ui.element("div").classes("unit-card-grid"):
                 for card in visible:
-                    unit_card(replace(card, owned=card.id in owned_cards))
+                    in_deck = card.id in deck_ids
+                    unit_card(
+                        replace(card, owned=card.id in owned_cards),
+                        selected=in_deck,
+                        status_label="編制中" if in_deck else None,
+                    )
 
         card_grid()
 
@@ -2395,7 +2411,10 @@ def deck_page() -> None:
             analysis = analyze_deck(deck_ids)
             with ui.element("div").classes("deck-layout"):
                 with ui.card().classes("panel"):
-                    section_heading("所持カード", "＋を押すと右側のデッキへ追加します。")
+                    section_heading(
+                        f"所持カード {len(owned_cards)} / {len(CARDS)}枚",
+                        "＋を押すと右側のデッキへ追加します。編制中のカードには印が付きます。",
+                    )
                     with ui.column().classes("w-full gap-2 deck-list mt-3"):
                         for card in CARDS:
                             with ui.element("div").classes("deck-row"):
@@ -2405,7 +2424,12 @@ def deck_page() -> None:
                                         with ui.row().classes("items-center gap-2"):
                                             ui.label(card.name).classes("font-bold text-sm")
                                             chip(card.branch)
+                                            if card.id in deck_ids:
+                                                chip("編制中", "green")
+                                            elif card.id not in owned_cards:
+                                                chip("未所持")
                                         ui.label(card.tagline).classes("muted text-xs")
+                                        card_stats(card)
                                     add = ui.button(
                                         icon="add", on_click=lambda card_id=card.id: add_card(card_id)
                                     ).props("round flat aria-label=カードを追加")
@@ -2417,7 +2441,9 @@ def deck_page() -> None:
                         with ui.row().classes("w-full items-start justify-between"):
                             with ui.column().classes("gap-0"):
                                 ui.label("はじめての統合部隊").classes("section-title")
-                                ui.label(f"{analysis['count']} / 12枚").classes("section-subtitle")
+                                ui.label(
+                                    f"現在選択中 {analysis['count']} / 12枚"
+                                ).classes("section-subtitle")
                             chip("使用中", "green")
                         ui.linear_progress(value=min(1, analysis["count"] / 12)).props("rounded size=8px").classes("progress-track mt-3")
                         with ui.column().classes("w-full gap-2 mt-4"):
@@ -2442,7 +2468,10 @@ def deck_page() -> None:
                             )
 
                     with ui.card().classes("panel"):
-                        section_heading("現在の12枚", "−を押すとデッキから外します。")
+                        section_heading(
+                            f"現在選択中 {len(deck_ids)} / 12枚",
+                            "−を押すとデッキから外します。",
+                        )
                         with ui.column().classes("w-full gap-2 mt-3"):
                             if not deck_ids:
                                 ui.label("カードがありません。左側から追加してください。").classes("section-subtitle")
@@ -2454,6 +2483,7 @@ def deck_page() -> None:
                                         with ui.column().classes("gap-0 flex-1"):
                                             ui.label(card.name).classes("font-bold text-sm")
                                             ui.label(f"{card.branch}・{card.echelon}").classes("muted text-xs")
+                                            card_stats(card)
                                         ui.button(
                                             icon="remove", on_click=lambda cid=card_id: remove_card(cid)
                                         ).props("round flat aria-label=カードを外す")
