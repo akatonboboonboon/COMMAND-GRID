@@ -66,6 +66,30 @@ class MatchServiceTests(unittest.TestCase):
         self.assertEqual(own_deployment.formation_id, "division")
         self.assertEqual(load_match(storage).to_dict(), advanced.to_dict())
 
+    def test_training_and_casual_use_easy_ai_while_ranked_keeps_standard(self) -> None:
+        expected_cards = {
+            "training": "recon_2",
+            "casual": "recon_2",
+            "ranked": "infantry_1",
+        }
+        for mode, expected_card in expected_cards.items():
+            with self.subTest(mode=mode):
+                player = update_mode(default_player_state(), mode)
+                storage: dict = {}
+                store_player_state(storage, player)
+                state = start_match(storage)
+                state, _ = play_player_round(
+                    storage, state.players["player"].hand[0], "center"
+                )
+                opponent_deployment = next(
+                    deployment
+                    for lane in state.lanes.values()
+                    for deployment in lane.deployments
+                    if deployment.player_id == "opponent"
+                )
+                self.assertEqual(opponent_deployment.card_id, expected_card)
+                self.assertEqual(opponent_deployment.lane_id, "left")
+
     def test_final_result_is_recorded_only_once(self) -> None:
         storage = self.make_storage()
         state = start_match(storage)

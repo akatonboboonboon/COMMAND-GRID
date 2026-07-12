@@ -51,6 +51,16 @@ from tutorial_data import (
     get_official_deck,
     get_tutorial,
 )
+from tutorial_match import (
+    TUTORIAL_AI_ID,
+    TUTORIAL_PLAYER_ID,
+    abandon_tutorial_match,
+    exercise_status,
+    play_tutorial_round,
+    restart_tutorial_match,
+    start_tutorial_match,
+    tutorial_match_status,
+)
 from symbol_catalog import (
     STAGE_LABELS,
     SYMBOL_CATALOG,
@@ -68,6 +78,7 @@ from player_state import (
     complete_card_tutorial,
     default_player_state,
     ensure_player_state,
+    flush_account_state,
     mark_account_session_verified,
     normalize_player_state,
     record_result,
@@ -105,6 +116,8 @@ from match_service import (
     start_match,
 )
 from multiplayer_service import (
+    CLAIMED_MATCHES_KEY,
+    PLAYER_TOKEN_KEY,
     MultiplayerError,
     cancel_waiting,
     claim_result as claim_multiplayer_result,
@@ -233,32 +246,139 @@ def account_store_error_message(error: AccountStoreError) -> str:
     return "アカウント保存中に問題が発生しました。しばらく待ってからもう一度お試しください。"
 
 
-def establish_account_session(username: str) -> dict[str, object]:
-    """Load an authenticated account into this NiceGUI user session."""
+def establish_account_session(
+    username: str,
+    *,
+    display_name: str | None = None,
+    prefer_local_pending: bool = False,
+    storage: MutableMapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Load an account, optionally restoring an explicitly chosen pending copy.
 
+    ``prefer_local_pending`` is honored only when the browser already names
+    the same account and carries a sync error.  The login UI asks before using
+    it so a stale browser cannot silently overwrite newer progress elsewhere.
+    """
+
+    user_storage = app.storage.user if storage is None else storage
     store = get_default_account_store()
     raw_state = store.load_player_state(username)
-    state = normalize_player_state(raw_state)
+    pending_username = user_storage.get(ACCOUNT_USERNAME_STORAGE_KEY)
+    pending_available = (
+        isinstance(pending_username, str)
+        and pending_username.casefold() == username.casefold()
+        and bool(user_storage.get(ACCOUNT_SYNC_ERROR_STORAGE_KEY))
+    )
+    use_local_pending = bool(prefer_local_pending and pending_available)
+    state = (
+        ensure_player_state(user_storage)
+        if use_local_pending
+        else normalize_player_state(raw_state)
+    )
+    needs_flush = use_local_pending
+    # ``accounts.display_name`` is the public account source of truth.  Older
+    # saves may still carry the previous name inside player_state, so merge it
+    # before exposing the restored state to the UI.
+    if display_name is not None and state["profile"]["display_name"] != display_name:
+        state = update_state_profile(state, display_name=display_name)
+        needs_flush = True
     token = store.create_session(username)
-    app.storage.user[ACCOUNT_USERNAME_STORAGE_KEY] = username
-    app.storage.user[ACCOUNT_SESSION_STORAGE_KEY] = token
-    mark_account_session_verified(app.storage.user, username, token)
-    stored = store_player_state(app.storage.user, state, sync_account=False)
+    user_storage[ACCOUNT_USERNAME_STORAGE_KEY] = username
+    user_storage[ACCOUNT_SESSION_STORAGE_KEY] = token
+    mark_account_session_verified(user_storage, username, token)
+    stored = store_player_state(user_storage, state, sync_account=False)
+    if needs_flush:
+        flush_account_state(user_storage)
+    else:
+        user_storage.pop(ACCOUNT_SYNC_ERROR_STORAGE_KEY, None)
     return stored
 
 
-def log_out_account() -> None:
-    token = app.storage.user.get(ACCOUNT_SESSION_STORAGE_KEY)
+def clear_multiplayer_session_for_logout(
+    storage: MutableMapping[str, object],
+) -> None:
+    """Best-effort close/forfeit before removing a browser bearer token."""
+
+    if PLAYER_TOKEN_KEY in storage:
+        try:
+            current = poll_multiplayer(storage)
+            status = str(current.get("status", "idle"))
+            if status in {"waiting", "waiting_friend"}:
+                cancel_waiting(storage)
+            elif status != "idle":
+                if status not in {"complete", "left"}:
+                    leave_multiplayer(storage)
+                close_multiplayer_session(storage)
+        except MultiplayerError:
+            # The process may already have forgotten the in-memory match.  The
+            # private browser token must still not cross into another account.
+            pass
+
+
+def log_out_account(
+    storage: MutableMapping[str, object] | None = None,
+) -> bool:
+    """Log out only after the newest local state is safely in the database.
+
+    A temporary database/network error must never turn a logout into a data
+    reset.  On failure the authenticated browser state is left untouched so
+    the player can retry without losing the only up-to-date copy.
+    """
+
+    user_storage = app.storage.user if storage is None else storage
+    username = user_storage.get(ACCOUNT_USERNAME_STORAGE_KEY)
+    token = user_storage.get(ACCOUNT_SESSION_STORAGE_KEY)
+    clear_multiplayer_session_for_logout(user_storage)
+    if isinstance(username, str) and username and isinstance(token, str) and token:
+        if not flush_account_state(user_storage):
+            return False
     if isinstance(token, str):
         try:
             get_default_account_store().delete_session(token)
         except AccountStoreError:
-            pass
-    app.storage.user.pop(ACCOUNT_USERNAME_STORAGE_KEY, None)
-    app.storage.user.pop(ACCOUNT_SESSION_STORAGE_KEY, None)
-    clear_account_session_cache(app.storage.user)
-    app.storage.user.pop(ACCOUNT_SYNC_ERROR_STORAGE_KEY, None)
-    store_player_state(app.storage.user, default_player_state())
+            user_storage[ACCOUNT_SYNC_ERROR_STORAGE_KEY] = (
+                "ログアウト用セッションを無効化できませんでした。端末のログイン状態は保持しています。"
+            )
+            return False
+    # Per-browser matches are not part of an account save.  Clear them at the
+    # account boundary so another login cannot inherit the previous player's
+    # unfinished board.
+    abandon_match(user_storage)
+    abandon_tutorial_match(user_storage)
+    user_storage.pop("battle_selection", None)
+    user_storage.pop(SIMULATION_MATCH_STORAGE_KEY, None)
+    user_storage.pop(SIMULATION_RECORDED_STORAGE_KEY, None)
+    user_storage.pop(SIMULATION_REWARDS_STORAGE_KEY, None)
+    user_storage.pop(PLAYER_TOKEN_KEY, None)
+    user_storage.pop(CLAIMED_MATCHES_KEY, None)
+    user_storage.pop("pvp_selection", None)
+    user_storage.pop("last_pvp_rewards", None)
+    user_storage.pop(ACCOUNT_USERNAME_STORAGE_KEY, None)
+    user_storage.pop(ACCOUNT_SESSION_STORAGE_KEY, None)
+    clear_account_session_cache(user_storage)
+    user_storage.pop(ACCOUNT_SYNC_ERROR_STORAGE_KEY, None)
+    store_player_state(
+        user_storage, default_player_state(), sync_account=False
+    )
+    return True
+
+
+def retry_account_save(
+    storage: MutableMapping[str, object] | None = None,
+) -> bool:
+    """Retry a pending account save and give one unambiguous UI result."""
+
+    user_storage = app.storage.user if storage is None else storage
+    saved = flush_account_state(user_storage)
+    if saved:
+        ui.notify("最新の進行状況をデータベースへ保存しました。", type="positive")
+    else:
+        ui.notify(
+            "まだ保存できません。ログアウトせず、少し待ってから再試行してください。",
+            type="negative",
+        )
+    return saved
+
 
 def get_preferences() -> dict[str, object]:
     return dict(ensure_player_state(app.storage.user)["preferences"])
@@ -720,7 +840,7 @@ def card_tutorial_tile(tutorial: CardTutorial, player: dict[str, object]) -> Non
 
 @contextmanager
 def page_shell(active: str, eyebrow: str, title: str, subtitle: str) -> Iterator[None]:
-    ui.add_head_html('<link rel="stylesheet" href="/static/styles.css?v=20260711-2">')
+    ui.add_head_html('<link rel="stylesheet" href="/static/styles.css?v=20260712-1">')
     ui.colors(
         primary="#60AFFF",
         secondary="#55C7D9",
@@ -818,6 +938,24 @@ def page_shell(active: str, eyebrow: str, title: str, subtitle: str) -> Iterator
             ui.label(eyebrow).classes("page-eyebrow")
             ui.label(title).classes("page-title")
             ui.label(subtitle).classes("page-subtitle")
+        sync_error = app.storage.user.get(ACCOUNT_SYNC_ERROR_STORAGE_KEY)
+        if account_username and sync_error:
+            with ui.element("div").classes(
+                "beginner-callout beginner-callout--yellow w-full"
+            ):
+                with ui.row().classes("w-full items-center justify-between gap-3"):
+                    with ui.column().classes("gap-1 flex-1"):
+                        ui.label("最新データがまだ保存されていません").classes(
+                            "font-bold"
+                        )
+                        ui.label(
+                            "端末側のデータは保持しています。保存が完了するまでログアウトは中止されます。"
+                        ).classes("text-sm")
+                    ui.button(
+                        "保存を再試行",
+                        icon="sync",
+                        on_click=retry_account_save,
+                    ).props("no-caps unelevated")
         yield
         ui.label(
             "本作の部隊・記号・編制は、実在する軍事記号を参考にゲーム向けに簡略化したものです。"
@@ -1054,6 +1192,7 @@ def basic_tutorial_page() -> None:
         "selected_card": "",
         "selected_lane": "",
         "revealed": False,
+        "hint_visible": False,
         "completion": bool(initial["basic_completed"]),
     }
 
@@ -1065,6 +1204,7 @@ def basic_tutorial_page() -> None:
             selected_card="",
             selected_lane="",
             revealed=False,
+            hint_visible=False,
         )
 
     def show_lesson(index: int) -> None:
@@ -1076,12 +1216,17 @@ def basic_tutorial_page() -> None:
 
     def answer_choice(lesson: BasicLesson, choice: str) -> None:
         view["answer"] = choice
+        view["hint_visible"] = False
         if choice == lesson.correct_choice:
             view["correct"] = True
             view["feedback"] = lesson.success_message
         else:
             view["correct"] = False
-            view["feedback"] = lesson.hint
+            view["feedback"] = "その行動では目標を達成できません。盤面と数値をもう一度確認してください。"
+        lesson_view.refresh()
+
+    def show_basic_hint() -> None:
+        view["hint_visible"] = True
         lesson_view.refresh()
 
     def select_training_card(card_id: str) -> None:
@@ -1104,7 +1249,8 @@ def basic_tutorial_page() -> None:
             view["feedback"] = lesson.success_message
         else:
             view["correct"] = False
-            view["feedback"] = lesson.hint
+            view["hint_visible"] = False
+            view["feedback"] = "指定されたカードと戦線の組み合わせを確認してください。"
         lesson_view.refresh()
 
     def reveal_training_order(lesson: BasicLesson) -> None:
@@ -1132,7 +1278,7 @@ def basic_tutorial_page() -> None:
 
     def render_choice_task(lesson: BasicLesson) -> None:
         with ui.element("div").classes("tutorial-choice-grid"):
-            for choice, label in lesson.choices:
+            for index, (choice, label) in enumerate(lesson.choices):
                 selected = view["answer"] == choice
                 state_class = " tutorial-choice--selected" if selected else ""
                 if selected and view["correct"]:
@@ -1140,11 +1286,12 @@ def basic_tutorial_page() -> None:
                 with ui.button(
                     on_click=lambda value=choice: answer_choice(lesson, value)
                 ).props("no-caps unelevated").classes(f"tutorial-choice{state_class}"):
+                    ui.label(chr(65 + index)).classes("page-eyebrow")
                     ui.label(label).classes("font-bold")
 
     def render_card_choice_task(lesson: BasicLesson) -> None:
         with ui.element("div").classes("tutorial-card-choice-grid"):
-            for card_id, _ in lesson.choices:
+            for index, (card_id, _) in enumerate(lesson.choices):
                 card = get_card(card_id)
                 selected = view["answer"] == card_id
                 state_class = " tutorial-card-choice--selected" if selected else ""
@@ -1153,6 +1300,7 @@ def basic_tutorial_page() -> None:
                 option = ui.card().classes(f"tutorial-card-choice{state_class}")
                 option.on("click", lambda _, value=card_id: answer_choice(lesson, value))
                 with option:
+                    ui.label(chr(65 + index)).classes("page-eyebrow")
                     with ui.row().classes("items-center gap-3 no-wrap"):
                         unit_symbol(card, "sm")
                         with ui.column().classes("gap-0 min-w-0"):
@@ -1288,6 +1436,19 @@ def basic_tutorial_page() -> None:
                     with ui.element("div").classes(f"tutorial-feedback{status_class}"):
                         ui.icon("check_circle" if view["correct"] else "lightbulb")
                         ui.label(str(view["feedback"])).classes("text-sm")
+                if view["feedback"] and not view["correct"]:
+                    if view["hint_visible"]:
+                        with ui.element("div").classes(
+                            "tutorial-feedback tutorial-feedback--hint"
+                        ):
+                            ui.icon("tips_and_updates")
+                            ui.label(str(lesson.hint)).classes("text-sm")
+                    else:
+                        secondary_button(
+                            "ヒントを見る",
+                            icon="tips_and_updates",
+                            on_click=show_basic_hint,
+                        )
 
                 with ui.row().classes("w-full items-center justify-between gap-3 mt-2"):
                     with ui.row().classes("gap-2"):
@@ -1345,10 +1506,20 @@ def card_tutorial_page(card_id: str) -> None:
         "feedback": "",
         "correct": False,
         "reviewing": False,
+        "hint_visible": False,
+        "exercise_selected": "",
+        "exercise_lane": "",
     }
 
     def reset_card_interaction() -> None:
-        view.update(answer="", feedback="", correct=False)
+        view.update(
+            answer="",
+            feedback="",
+            correct=False,
+            hint_visible=False,
+            exercise_selected="",
+            exercise_lane="",
+        )
 
     def show_card_stage(index: int) -> None:
         view["reviewing"] = True
@@ -1360,13 +1531,304 @@ def card_tutorial_page(card_id: str) -> None:
     def answer_card_check(choice: str) -> None:
         stage = tutorial.stages[int(view["index"])]
         view["answer"] = choice
+        view["hint_visible"] = False
         if choice == stage.correct_choice:
             view["correct"] = True
             view["feedback"] = stage.success_message
         else:
             view["correct"] = False
-            view["feedback"] = "惜しいです。上の『注意』と、同じ戦線に必要な条件をもう一度確認してください。"
+            view["feedback"] = "その行動では目標を達成できません。盤面と数値をもう一度確認してください。"
         course_view.refresh()
+
+    def show_card_hint() -> None:
+        view["hint_visible"] = True
+        course_view.refresh()
+
+    def select_exercise_card(card_id_to_select: str) -> None:
+        state = start_tutorial_match(app.storage.user, card_id)
+        if state.phase is Phase.COMPLETE:
+            return
+        if card_id_to_select not in state.players[TUTORIAL_PLAYER_ID].hand:
+            ui.notify("そのカードは現在の手札にありません。", type="warning")
+            return
+        view["exercise_selected"] = card_id_to_select
+        view["exercise_lane"] = ""
+        course_view.refresh()
+
+    def select_exercise_lane(lane_id: str) -> None:
+        if not view["exercise_selected"]:
+            ui.notify("先に手札からカードを1枚選んでください。", type="warning")
+            return
+        view["exercise_lane"] = lane_id
+        course_view.refresh()
+
+    def execute_exercise_order() -> None:
+        selected = str(view["exercise_selected"])
+        lane_id = str(view["exercise_lane"])
+        if not selected or not lane_id:
+            ui.notify("カードと配置する戦線を選んでください。", type="warning")
+            return
+        try:
+            _, _, status = play_tutorial_round(
+                app.storage.user, card_id, selected, lane_id
+            )
+        except RuleViolation as error:
+            ui.notify(str(error), type="negative")
+            return
+        view["exercise_selected"] = ""
+        view["exercise_lane"] = ""
+        view["correct"] = status.passed
+        view["feedback"] = status.message
+        course_view.refresh()
+
+    def restart_card_exercise() -> None:
+        restart_tutorial_match(app.storage.user, card_id)
+        reset_card_interaction()
+        course_view.refresh()
+        ui.notify("盤面0枚・第1ターンからやり直します。", type="positive")
+
+    def featured_card_exercise_tip() -> str:
+        if card.recon > 0:
+            return "未確認部隊がある戦線へ置き、相手カードが公開される変化を確認します。"
+        if card.supply > 0:
+            return "補給を必要とする機甲か砲兵と同じ戦線へ置き、不足が減る変化を確認します。"
+        if card.supply < 0:
+            return "補給を生む兵站カードと同じ戦線へ置き、不足による減点を防ぎます。"
+        if card.control == 0 and card.support > 0:
+            return "制圧を持つ味方と同じ戦線へ置き、支援を有効にします。"
+        if card.support > 0:
+            return "同じ戦線の味方と合計し、制圧と支援が両方働く場面を作ります。"
+        return "まだ弱い戦線へ置き、その戦線を確保できるか確認します。"
+
+    def render_card_exercise() -> None:
+        """Render the isolated nine-turn match used by the final card lesson."""
+
+        active = start_tutorial_match(app.storage.user, card_id)
+        status = exercise_status(active, card_id)
+        human = active.players[TUTORIAL_PLAYER_ID]
+        opponent = active.players[TUTORIAL_AI_ID]
+        selected_id = str(view["exercise_selected"])
+        selected_lane = str(view["exercise_lane"])
+        total_deployments = sum(
+            len(lane.deployments) for lane in active.lanes.values()
+        )
+
+        with ui.element("div").classes("beginner-callout w-full"):
+            with ui.row().classes("w-full items-center justify-between gap-3"):
+                with ui.column().classes("gap-1 flex-1"):
+                    ui.label("修了条件").classes("page-eyebrow")
+                    ui.label(
+                        f"{card.name}を1回以上使い、9ターン終了時に2戦線を確保する"
+                    ).classes("font-bold")
+                    ui.label(
+                        "この専用AIは初心者向けに弱く調整されています。通常対戦の戦績や報酬には影響しません。"
+                    ).classes("text-sm")
+                    ui.label(
+                        f"今回の試し方：{featured_card_exercise_tip()}"
+                    ).classes("text-sm blue-text")
+                with ui.row().classes("gap-2"):
+                    chip(
+                        "履修カード使用済み" if status.featured_card_used else "履修カード未使用",
+                        "green" if status.featured_card_used else "yellow",
+                    )
+                    chip(
+                        f"現在 {status.controlled_lane_count}戦線",
+                        "green" if status.controlled_lane_count >= 2 else "",
+                    )
+
+        with ui.element("div").classes("battle-status mt-3"):
+            with ui.column().classes("gap-0"):
+                ui.label("あなた").classes("font-bold")
+                ui.label(f"任務点 {human.mission_points}").classes(
+                    "mono blue-text text-xs"
+                )
+            with ui.column().classes("items-center gap-0"):
+                ui.label(
+                    f"ROUND {active.round_no} / {active.max_rounds}"
+                ).classes("mono text-xl font-bold")
+                ui.label(
+                    "両軍とも盤面0枚" if total_deployments == 0 else status.message
+                ).classes("muted text-xs text-center")
+            with ui.column().classes("items-end gap-0"):
+                ui.label(opponent.name).classes("font-bold")
+                ui.label(f"任務点 {opponent.mission_points}").classes(
+                    "danger-text text-xs"
+                )
+
+        with ui.element("div").classes(
+            "lane-grid tutorial-exercise-lanes mt-3"
+        ):
+            lane_names = {
+                "left": "左戦線",
+                "center": "中央戦線",
+                "right": "右戦線",
+            }
+            for lane_id, lane_name in lane_names.items():
+                lane = active.lanes[lane_id]
+                own_power = calculate_lane_power(
+                    active, lane_id, TUTORIAL_PLAYER_ID
+                )
+                visible_enemy_power = calculate_lane_power(
+                    active,
+                    lane_id,
+                    TUTORIAL_AI_ID,
+                    visible_to=TUTORIAL_PLAYER_ID,
+                )
+                own_cards = [
+                    get_card(deployment.card_id).name
+                    for deployment in lane.deployments
+                    if deployment.player_id == TUTORIAL_PLAYER_ID
+                ]
+                enemy_cards = [
+                    (
+                        get_card(deployment.card_id).name
+                        if deployment.visible_to(TUTORIAL_PLAYER_ID)
+                        else "未確認部隊"
+                    )
+                    for deployment in lane.deployments
+                    if deployment.player_id == TUTORIAL_AI_ID
+                ]
+                hidden_enemy_count = sum(
+                    deployment.player_id == TUTORIAL_AI_ID
+                    and not deployment.visible_to(TUTORIAL_PLAYER_ID)
+                    for deployment in lane.deployments
+                )
+                latest_winner = (
+                    lane.round_winners[-1] if lane.round_winners else None
+                )
+                selected_class = (
+                    " battle-lane--planned" if selected_lane == lane_id else ""
+                )
+                with ui.element("div").classes(f"battle-lane{selected_class}"):
+                    with ui.row().classes(
+                        "lane-header items-center justify-between"
+                    ):
+                        ui.label(lane_name).classes("font-bold")
+                        if latest_winner == TUTORIAL_PLAYER_ID:
+                            chip("あなたが確保", "green")
+                        elif latest_winner == TUTORIAL_AI_ID:
+                            chip("AIが確保", "red")
+                        else:
+                            chip("互角", "yellow")
+                    ui.label("AIの部隊").classes("muted text-xs mt-3")
+                    ui.label("・".join(enemy_cards) or "まだ配備なし").classes(
+                        "text-sm"
+                    )
+                    with ui.element("div").classes("control-meter mt-3"):
+                        ui.label(f"味方 {own_power.total}").classes("blue-text")
+                        ui.label("戦線力").classes("muted")
+                        enemy_total = (
+                            f"{visible_enemy_power.total}+?"
+                            if hidden_enemy_count
+                            else str(visible_enemy_power.total)
+                        )
+                        ui.label(f"敵 {enemy_total}").classes(
+                            "danger-text text-right"
+                        )
+                    ui.label("あなたの部隊").classes("muted text-xs mt-3")
+                    ui.label("・".join(own_cards) or "まだ配備なし").classes(
+                        "font-bold text-sm"
+                    )
+                    choose_lane = ui.button(
+                        "この戦線を選ぶ",
+                        icon="place",
+                        on_click=lambda lane_value=lane_id: select_exercise_lane(
+                            lane_value
+                        ),
+                    ).props("flat no-caps").classes("card-action mt-3")
+                    if active.phase is Phase.COMPLETE or not selected_id:
+                        choose_lane.props("disable")
+
+        if active.phase is Phase.COMPLETE:
+            result_class = (
+                "tutorial-feedback--correct"
+                if status.passed
+                else "tutorial-feedback--hint"
+            )
+            with ui.element("div").classes(
+                f"tutorial-feedback {result_class} mt-3"
+            ):
+                ui.icon("workspace_premium" if status.passed else "replay")
+                with ui.column().classes("gap-1"):
+                    ui.label(
+                        "実戦演習クリア" if status.passed else "もう一度挑戦"
+                    ).classes("font-bold")
+                    ui.label(status.message).classes("text-sm")
+            if not status.passed:
+                primary_button(
+                    "盤面0枚から再挑戦",
+                    icon="replay",
+                    on_click=restart_card_exercise,
+                ).classes("mt-3")
+            return
+
+        with ui.card().classes("panel battle-hand-panel mt-3"):
+            with ui.row().classes("w-full items-center justify-between gap-3"):
+                with ui.column().classes("gap-0"):
+                    ui.label(f"手札（残り {len(human.hand)}枚）").classes(
+                        "section-title"
+                    )
+                    ui.label(
+                        "カードを1枚選び、その後に上の戦線を1つ選びます。"
+                    ).classes("section-subtitle")
+                chip(f"{card.name}は必ず手札", "yellow")
+            with ui.element("div").classes("hand-strip mt-3"):
+                for hand_card_id in human.hand:
+                    hand_card_data = get_card(hand_card_id)
+                    selected_class = (
+                        " hand-card--selected"
+                        if selected_id == hand_card_id
+                        else ""
+                    )
+                    featured_class = (
+                        " hand-card--featured"
+                        if hand_card_id == card_id
+                        else ""
+                    )
+                    hand_card = ui.card().classes(
+                        f"hand-card{selected_class}{featured_class}"
+                    )
+                    hand_card.on(
+                        "click",
+                        lambda _, chosen_id=hand_card_id: select_exercise_card(
+                            chosen_id
+                        ),
+                    )
+                    with hand_card:
+                        with ui.row().classes(
+                            "w-full items-start justify-between gap-2 no-wrap"
+                        ):
+                            ui.label(hand_card_data.branch).classes(
+                                "unit-card__branch"
+                            )
+                            if hand_card_id == card_id:
+                                chip("履修中", "yellow")
+                        ui.label(hand_card_data.name).classes(
+                            "font-bold text-sm min-h-10"
+                        )
+                        with ui.element("div").classes(
+                            "unit-card__symbol-area"
+                        ).style("min-height:72px"):
+                            unit_symbol(hand_card_data, "sm")
+                        card_stats(hand_card_data)
+            with ui.row().classes(
+                "w-full items-center justify-between gap-3"
+            ):
+                if selected_id and selected_lane:
+                    ui.label(
+                        f"予定：{get_card(selected_id).name} → {lane_names[selected_lane]}"
+                    ).classes("font-bold")
+                else:
+                    ui.label("カードと戦線を選んでください").classes(
+                        "muted text-sm"
+                    )
+                confirm = primary_button(
+                    "このターンの命令を確定",
+                    icon="check",
+                    on_click=execute_exercise_order,
+                )
+                if not selected_id or not selected_lane:
+                    confirm.props("disable")
 
     def advance_card_course() -> None:
         index = int(view["index"])
@@ -1375,6 +1837,13 @@ def card_tutorial_page(card_id: str) -> None:
             return
         state = ensure_player_state(app.storage.user)
         if index == total_stages - 1:
+            status = tutorial_match_status(app.storage.user, card_id)
+            if status is None or not status.passed:
+                ui.notify(
+                    "9ターンを終え、履修カードを使って2戦線を確保すると修了できます。",
+                    type="warning",
+                )
+                return
             state = complete_card_tutorial(
                 state,
                 card_id,
@@ -1382,6 +1851,7 @@ def card_tutorial_page(card_id: str) -> None:
                 final_stage=total_stages,
             )
             store_player_state(app.storage.user, state)
+            abandon_tutorial_match(app.storage.user)
             view["reviewing"] = False
         else:
             state = update_card_tutorial_stage(state, card_id, index + 1)
@@ -1430,12 +1900,24 @@ def card_tutorial_page(card_id: str) -> None:
                 with ui.card().classes("tutorial-lesson-card"):
                     ui.label(stage.title).classes("text-2xl font-bold")
                     ui.label(stage.summary).classes("tutorial-plain-goal")
-                    ui.label(stage.explanation).classes("section-subtitle tutorial-copy")
-                    with ui.element("div").classes("tutorial-practice"):
-                        ui.label("この章で確認すること").classes("blue-text text-xs font-bold")
-                        ui.label(stage.practice).classes("text-sm")
+                    if stage.id == "exercise":
+                        ui.label(
+                            f"{card.name}は最初から手札にあります。下の盤面だけ見て、一手ずつ進めてください。"
+                        ).classes("section-subtitle tutorial-copy")
+                    else:
+                        ui.label(stage.explanation).classes(
+                            "section-subtitle tutorial-copy"
+                        )
+                        with ui.element("div").classes("tutorial-practice"):
+                            ui.label("この章で確認すること").classes(
+                                "blue-text text-xs font-bold"
+                            )
+                            ui.label(stage.practice).classes("text-sm")
 
-                    if stage.choices:
+                    if stage.id == "exercise":
+                        ui.separator().classes("bg-blue-grey-8 my-2")
+                        render_card_exercise()
+                    elif stage.choices:
                         ui.separator().classes("bg-blue-grey-8 my-2")
                         ui.label(stage.question).classes("font-bold text-lg")
                         if stage.exercise_lanes:
@@ -1485,11 +1967,30 @@ def card_tutorial_page(card_id: str) -> None:
                                     ).props("no-caps unelevated").classes(f"tutorial-choice{state_class}"):
                                         pass
 
-                    if view["feedback"]:
+                    if view["feedback"] and stage.id != "exercise":
                         status_class = " tutorial-feedback--correct" if view["correct"] else " tutorial-feedback--hint"
                         with ui.element("div").classes(f"tutorial-feedback{status_class}"):
                             ui.icon("check_circle" if view["correct"] else "lightbulb")
                             ui.label(str(view["feedback"])).classes("text-sm")
+                    if (
+                        view["feedback"]
+                        and not view["correct"]
+                        and stage.choices
+                    ):
+                        if view["hint_visible"]:
+                            with ui.element("div").classes(
+                                "tutorial-feedback tutorial-feedback--hint"
+                            ):
+                                ui.icon("tips_and_updates")
+                                ui.label(
+                                    "制圧・有効な支援・補給不足の順に、3つの候補を同じ方法で計算してください。"
+                                ).classes("text-sm")
+                        else:
+                            secondary_button(
+                                "ヒントを見る",
+                                icon="tips_and_updates",
+                                on_click=show_card_hint,
+                            )
 
                     with ui.row().classes("w-full items-center justify-between gap-3 mt-3"):
                         with ui.row().classes("gap-2"):
@@ -1499,7 +2000,20 @@ def card_tutorial_page(card_id: str) -> None:
                                     on_click=lambda: show_card_stage(index - 1),
                                 )
                             secondary_button("訓練所へ", "/tutorials", "close")
-                        if not stage.choices or view["correct"]:
+                        exercise_ready = False
+                        if stage.id == "exercise":
+                            exercise_progress = tutorial_match_status(
+                                app.storage.user, card_id
+                            )
+                            exercise_ready = bool(
+                                exercise_progress and exercise_progress.passed
+                            )
+                        if (
+                            exercise_ready
+                            or (stage.id != "exercise" and (
+                                not stage.choices or view["correct"]
+                            ))
+                        ):
                             primary_button(
                                 "訓練を完了してデッキを受け取る" if index == total_stages - 1 else "理解した・次の章へ",
                                 icon="arrow_forward",
@@ -1682,7 +2196,13 @@ def symbols_page() -> None:
                 return
             store_player_state(app.storage.user, state)
             family_view.refresh()
-            ui.notify("アカウントアイコンを変更しました。", type="positive")
+            if app.storage.user.get(ACCOUNT_SYNC_ERROR_STORAGE_KEY):
+                ui.notify(
+                    "端末では変更しましたが、データベースへまだ保存できていません。",
+                    type="negative",
+                )
+            else:
+                ui.notify("アカウントアイコンを変更しました。", type="positive")
 
         ui.select(
             list(family_by_name), value=catalog_state["family"], label="見る分類を1つ選ぶ",
@@ -3497,13 +4017,32 @@ def account_page() -> None:
                     ui.label(f"@{username}・{account_backend_label()}").classes("section-subtitle")
                     if selected_symbol:
                         ui.label(f"アカウントアイコン：{selected_symbol.name}").classes("blue-text text-sm")
-                secondary_button("ログアウト", icon="logout", on_click=lambda: (log_out_account(), go("/")))
+                def request_logout() -> None:
+                    if log_out_account():
+                        go("/")
+                        return
+                    ui.notify(
+                        "データまたはログイン状態を守るため、ログアウトを中止しました。少し待って再試行してください。",
+                        type="negative",
+                    )
+
+                secondary_button(
+                    "ログアウト", icon="logout", on_click=request_logout
+                )
 
             sync_error = app.storage.user.get(ACCOUNT_SYNC_ERROR_STORAGE_KEY)
             if sync_error:
                 with ui.element("div").classes("beginner-callout beginner-callout--yellow"):
-                    ui.label("データベースへの保存を再試行します").classes("font-bold")
+                    ui.label("データベースへ未保存の変更があります").classes("font-bold")
                     ui.label(str(sync_error)).classes("text-sm")
+                    ui.button(
+                        "今すぐ保存を再試行",
+                        icon="sync",
+                        on_click=lambda: (
+                            retry_account_save(),
+                            go("/account"),
+                        ),
+                    ).props("no-caps unelevated").classes("mt-2")
 
             def save_account_name() -> None:
                 value = str(display_name_input.value or "")
@@ -3517,6 +4056,13 @@ def account_page() -> None:
                 except (AccountStoreError, ValueError) as error:
                     ui.notify(str(error), type="negative")
                     return
+                if app.storage.user.get(ACCOUNT_SYNC_ERROR_STORAGE_KEY):
+                    ui.notify(
+                        "表示名は端末側だけ変更されています。保存を再試行してください。",
+                        type="negative",
+                    )
+                    go("/account")
+                    return
                 ui.notify("表示名を保存しました。", type="positive")
                 go("/account")
 
@@ -3528,6 +4074,13 @@ def account_page() -> None:
                     store_player_state(app.storage.user, state)
                 except ValueError as error:
                     ui.notify(str(error), type="warning")
+                    return
+                if app.storage.user.get(ACCOUNT_SYNC_ERROR_STORAGE_KEY):
+                    ui.notify(
+                        "アイコンは端末側だけ変更されています。保存を再試行してください。",
+                        type="negative",
+                    )
+                    go("/account")
                     return
                 ui.notify("アカウントアイコンを変更しました。", type="positive")
                 go("/account")
@@ -3567,16 +4120,69 @@ def account_page() -> None:
             return
 
         login_state = {"busy": False}
+        pending_login = {"username": "", "display_name": ""}
 
-        def login() -> None:
+        def finish_pending_login(prefer_local_pending: bool) -> None:
             if login_state["busy"]:
                 return
             login_state["busy"] = True
             try:
-                account = get_default_account_store().authenticate(
-                    str(login_username.value or ""), str(login_password.value or "")
+                establish_account_session(
+                    pending_login["username"],
+                    display_name=pending_login["display_name"],
+                    prefer_local_pending=prefer_local_pending,
                 )
-                establish_account_session(account.username)
+                if app.storage.user.get(ACCOUNT_SYNC_ERROR_STORAGE_KEY):
+                    pending_recovery_dialog.close()
+                    ui.notify(
+                        "ログインはできましたが、復旧データをまだ保存できません。端末側には保持しています。",
+                        type="negative",
+                    )
+                    go("/account")
+                    return
+            except AccountStoreError as error:
+                ui.notify(account_store_error_message(error), type="negative")
+                return
+            finally:
+                login_state["busy"] = False
+            pending_recovery_dialog.close()
+            ui.notify(
+                (
+                    "この端末の未保存データを復旧しました。"
+                    if prefer_local_pending
+                    else "データベースに保存されていた状態を読み込みました。"
+                ),
+                type="positive",
+            )
+            go("/")
+
+        def login() -> None:
+            if login_state["busy"]:
+                return
+            requested_username = str(login_username.value or "").strip()
+            login_state["busy"] = True
+            try:
+                account = get_default_account_store().authenticate(
+                    requested_username, str(login_password.value or "")
+                )
+                stored_username = app.storage.user.get(
+                    ACCOUNT_USERNAME_STORAGE_KEY
+                )
+                has_same_account_pending = (
+                    isinstance(stored_username, str)
+                    and stored_username.casefold() == account.username.casefold()
+                    and bool(
+                        app.storage.user.get(ACCOUNT_SYNC_ERROR_STORAGE_KEY)
+                    )
+                )
+                if has_same_account_pending:
+                    pending_login["username"] = account.username
+                    pending_login["display_name"] = account.display_name
+                    pending_recovery_dialog.open()
+                    return
+                establish_account_session(
+                    account.username, display_name=account.display_name
+                )
             except AuthenticationError:
                 ui.notify("ユーザー名またはパスワードが違います。", type="negative")
                 return
@@ -3590,6 +4196,42 @@ def account_page() -> None:
                 login_state["busy"] = False
             ui.notify("ログインしました。保存データを復元しました。", type="positive")
             go("/")
+
+        with ui.dialog() as pending_recovery_dialog, ui.card().classes(
+            "dialog-card"
+        ):
+            ui.label("未保存データがこの端末に残っています").classes(
+                "text-xl font-bold"
+            )
+            ui.label(
+                "前回はデータベースへ保存できないままログイン期限が切れました。どちらを使うか選んでください。"
+            ).classes("section-subtitle")
+            with ui.element("div").classes("beginner-callout mt-2"):
+                ui.label("おすすめ：この端末の未保存データを復旧").classes(
+                    "font-bold"
+                )
+                ui.label(
+                    "今この端末に見えているアイコン・カード・進捗・設定をデータベースへ保存します。"
+                ).classes("text-sm")
+            ui.label(
+                "別端末で後から進めていた場合は『データベース版を使う』を選んでください。"
+            ).classes("muted text-xs")
+            with ui.row().classes("gap-2 mt-3"):
+                primary_button(
+                    "この端末の未保存を復旧",
+                    icon="restore",
+                    on_click=lambda: finish_pending_login(True),
+                )
+                secondary_button(
+                    "データベース版を使う",
+                    icon="cloud_download",
+                    on_click=lambda: finish_pending_login(False),
+                )
+                secondary_button(
+                    "いまは選ばない",
+                    icon="close",
+                    on_click=pending_recovery_dialog.close,
+                )
 
         def register() -> None:
             if login_state["busy"]:

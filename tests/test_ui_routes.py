@@ -1,17 +1,221 @@
 import unittest
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from account_store import AccountConfigurationError, AccountDatabaseError
+from account_store import AccountConfigurationError, AccountDatabaseError, AccountStore
 import main
 from player_state import (
     ACCOUNT_SESSION_STORAGE_KEY,
+    ACCOUNT_SYNC_ERROR_STORAGE_KEY,
     ACCOUNT_USERNAME_STORAGE_KEY,
+    PLAYER_STATE_KEY,
+    default_player_state,
     mark_account_session_verified,
+    update_basic_tutorial_stage,
+    update_selected_symbol,
 )
 
 
 class UiRouteTests(unittest.TestCase):
+    def test_login_path_restores_saved_icon_and_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = AccountStore(sqlite_path=Path(directory) / "accounts.sqlite3")
+            state = default_player_state()
+            symbol_id = state["collection"]["unlocked_symbols"][-1]
+            state = update_selected_symbol(state, symbol_id)
+            state = update_basic_tutorial_stage(state, 5)
+            account = store.register(
+                "ui_restore", "password123", "復元プレイヤー", state
+            )
+            storage: dict[str, object] = {}
+            try:
+                with patch.object(main, "get_default_account_store", return_value=store):
+                    restored = main.establish_account_session(
+                        account.username, storage=storage
+                    )
+            finally:
+                store.close()
+
+        self.assertEqual(restored["profile"]["selected_symbol"], symbol_id)
+        self.assertEqual(restored["tutorials"]["basic_stage"], 5)
+        self.assertEqual(
+            storage[PLAYER_STATE_KEY]["profile"]["selected_symbol"], symbol_id
+        )
+        self.assertEqual(storage[ACCOUNT_USERNAME_STORAGE_KEY], "ui_restore")
+        self.assertIn(ACCOUNT_SESSION_STORAGE_KEY, storage)
+
+    def test_explicit_local_recovery_uploads_pending_same_account_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = AccountStore(sqlite_path=Path(directory) / "accounts.sqlite3")
+            remote_state = update_basic_tutorial_stage(default_player_state(), 2)
+            account = store.register(
+                "pending_restore", "password123", "復旧プレイヤー", remote_state
+            )
+            pending_state = update_selected_symbol(
+                remote_state,
+                remote_state["collection"]["unlocked_symbols"][-1],
+            )
+            pending_state = update_basic_tutorial_stage(pending_state, 6)
+            storage: dict[str, object] = {
+                PLAYER_STATE_KEY: pending_state,
+                ACCOUNT_USERNAME_STORAGE_KEY: account.username,
+                ACCOUNT_SESSION_STORAGE_KEY: "expired-session-token",
+                ACCOUNT_SYNC_ERROR_STORAGE_KEY: "session expired before save",
+            }
+            try:
+                with patch.object(
+                    main, "get_default_account_store", return_value=store
+                ), patch(
+                    "account_store.get_default_account_store", return_value=store
+                ):
+                    restored = main.establish_account_session(
+                        account.username,
+                        prefer_local_pending=True,
+                        storage=storage,
+                    )
+                database_copy = store.load_player_state(account.username)
+            finally:
+                store.close()
+
+        self.assertEqual(restored["tutorials"]["basic_stage"], 6)
+        self.assertEqual(
+            restored["profile"]["selected_symbol"],
+            pending_state["profile"]["selected_symbol"],
+        )
+        self.assertEqual(database_copy, restored)
+        self.assertNotIn(ACCOUNT_SYNC_ERROR_STORAGE_KEY, storage)
+
+    def test_database_choice_keeps_remote_state_instead_of_stale_pending(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = AccountStore(sqlite_path=Path(directory) / "accounts.sqlite3")
+            remote_state = update_basic_tutorial_stage(default_player_state(), 3)
+            account = store.register(
+                "remote_restore", "password123", "DBプレイヤー", remote_state
+            )
+            pending_state = update_basic_tutorial_stage(remote_state, 7)
+            storage: dict[str, object] = {
+                PLAYER_STATE_KEY: pending_state,
+                ACCOUNT_USERNAME_STORAGE_KEY: account.username,
+                ACCOUNT_SESSION_STORAGE_KEY: "expired-session-token",
+                ACCOUNT_SYNC_ERROR_STORAGE_KEY: "old local failure",
+            }
+            try:
+                with patch.object(
+                    main, "get_default_account_store", return_value=store
+                ):
+                    restored = main.establish_account_session(
+                        account.username,
+                        prefer_local_pending=False,
+                        storage=storage,
+                    )
+                database_copy = store.load_player_state(account.username)
+            finally:
+                store.close()
+
+        self.assertEqual(restored["tutorials"]["basic_stage"], 3)
+        self.assertEqual(database_copy, remote_state)
+        self.assertNotIn(ACCOUNT_SYNC_ERROR_STORAGE_KEY, storage)
+
+    def test_logout_failure_keeps_the_only_current_copy_and_session(self) -> None:
+        state = default_player_state()
+        state = update_selected_symbol(
+            state, state["collection"]["unlocked_symbols"][-1]
+        )
+        storage: dict[str, object] = {
+            PLAYER_STATE_KEY: state,
+            ACCOUNT_USERNAME_STORAGE_KEY: "field.fox",
+            ACCOUNT_SESSION_STORAGE_KEY: "current-session-token",
+            ACCOUNT_SYNC_ERROR_STORAGE_KEY: "temporary failure",
+        }
+        before = dict(storage)
+
+        with patch.object(main, "flush_account_state", return_value=False), patch.object(
+            main,
+            "get_default_account_store",
+            side_effect=AssertionError("failed flush must stop before session deletion"),
+        ):
+            self.assertFalse(main.log_out_account(storage))
+
+        self.assertEqual(storage, before)
+
+    def test_session_revocation_failure_aborts_logout(self) -> None:
+        state = update_selected_symbol(
+            default_player_state(),
+            default_player_state()["collection"]["unlocked_symbols"][-1],
+        )
+        storage: dict[str, object] = {
+            PLAYER_STATE_KEY: state,
+            ACCOUNT_USERNAME_STORAGE_KEY: "field.fox",
+            ACCOUNT_SESSION_STORAGE_KEY: "current-session-token",
+        }
+        store = Mock()
+        store.delete_session.side_effect = AccountDatabaseError(
+            "temporary revocation failure"
+        )
+
+        with patch.object(main, "flush_account_state", return_value=True), patch.object(
+            main, "get_default_account_store", return_value=store
+        ):
+            self.assertFalse(main.log_out_account(storage))
+
+        self.assertEqual(storage[PLAYER_STATE_KEY], state)
+        self.assertEqual(storage[ACCOUNT_USERNAME_STORAGE_KEY], "field.fox")
+        self.assertEqual(
+            storage[ACCOUNT_SESSION_STORAGE_KEY], "current-session-token"
+        )
+        self.assertIn("ログイン状態は保持", storage[ACCOUNT_SYNC_ERROR_STORAGE_KEY])
+
+    def test_successful_logout_flushes_then_clears_account_scoped_state(self) -> None:
+        storage: dict[str, object] = {
+            PLAYER_STATE_KEY: default_player_state(),
+            ACCOUNT_USERNAME_STORAGE_KEY: "field.fox",
+            ACCOUNT_SESSION_STORAGE_KEY: "current-session-token",
+            ACCOUNT_SYNC_ERROR_STORAGE_KEY: "old failure",
+            "active_match": {"game": "old"},
+            "card_tutorial_match": {"game": "old"},
+            "battle_selection": {"selected": "infantry_1"},
+            main.SIMULATION_MATCH_STORAGE_KEY: {"game": "old"},
+            main.SIMULATION_RECORDED_STORAGE_KEY: "old",
+            main.SIMULATION_REWARDS_STORAGE_KEY: {"cards": ["old"]},
+            main.PLAYER_TOKEN_KEY: "A" * 32,
+            main.CLAIMED_MATCHES_KEY: ["old-match"],
+            "pvp_selection": {"selected": "infantry_1"},
+            "last_pvp_rewards": {"cards": ["old"]},
+        }
+        store = Mock()
+
+        with (
+            patch.object(main, "flush_account_state", return_value=True),
+            patch.object(main, "get_default_account_store", return_value=store),
+            patch.object(
+                main, "poll_multiplayer", return_value={"status": "playing"}
+            ) as poll_online,
+            patch.object(main, "leave_multiplayer") as leave_online,
+            patch.object(main, "close_multiplayer_session") as close_online,
+        ):
+            self.assertTrue(main.log_out_account(storage))
+
+        poll_online.assert_called_once_with(storage)
+        leave_online.assert_called_once_with(storage)
+        close_online.assert_called_once_with(storage)
+        store.delete_session.assert_called_once_with("current-session-token")
+        self.assertNotIn(ACCOUNT_USERNAME_STORAGE_KEY, storage)
+        self.assertNotIn(ACCOUNT_SESSION_STORAGE_KEY, storage)
+        self.assertNotIn(ACCOUNT_SYNC_ERROR_STORAGE_KEY, storage)
+        self.assertNotIn("active_match", storage)
+        self.assertNotIn("card_tutorial_match", storage)
+        self.assertNotIn("battle_selection", storage)
+        self.assertNotIn(main.SIMULATION_MATCH_STORAGE_KEY, storage)
+        self.assertNotIn(main.SIMULATION_RECORDED_STORAGE_KEY, storage)
+        self.assertNotIn(main.SIMULATION_REWARDS_STORAGE_KEY, storage)
+        self.assertNotIn(main.PLAYER_TOKEN_KEY, storage)
+        self.assertNotIn(main.CLAIMED_MATCHES_KEY, storage)
+        self.assertNotIn("pvp_selection", storage)
+        self.assertNotIn("last_pvp_rewards", storage)
+        self.assertEqual(storage[PLAYER_STATE_KEY], default_player_state())
+
     def test_signed_in_username_uses_fresh_session_cache(self) -> None:
         storage: dict[str, object] = {
             ACCOUNT_USERNAME_STORAGE_KEY: "field.fox",

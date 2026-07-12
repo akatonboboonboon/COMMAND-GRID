@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from game_data import CARDS, STARTER_DECK
 from game_engine import (
+    AiDifficulty,
     GameState,
     RoundResolution,
     new_game,
@@ -40,6 +41,13 @@ _OPPONENT_NAMES = {
     "casual": "カジュアルAI",
     "ranked": "ランクAI",
     "friend": "フレンド代役AI",
+}
+
+_AI_DIFFICULTY_BY_MODE = {
+    "training": AiDifficulty.EASY,
+    "casual": AiDifficulty.EASY,
+    "ranked": AiDifficulty.STANDARD,
+    "friend": AiDifficulty.STANDARD,
 }
 
 
@@ -133,6 +141,9 @@ def play_player_round(
         lane_id,
         ai_id=AI_PLAYER_ID,
         formation_id=str(envelope["formation"]),
+        ai_difficulty=_AI_DIFFICULTY_BY_MODE.get(
+            str(envelope["mode"]), AiDifficulty.STANDARD
+        ),
     )
     if resolution.match_complete:
         _record_completed_result_once(storage, state, envelope)

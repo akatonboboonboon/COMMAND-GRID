@@ -3,9 +3,9 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-from account_store import AccountStore
+from account_store import AccountDatabaseError, AccountStore
 from advanced_game_data import ADVANCED_CARDS, ADVANCED_STARTER_DECK
 from game_data import CARDS, STARTER_DECK
 from player_state import (
@@ -22,6 +22,7 @@ from player_state import (
     complete_card_tutorial,
     default_player_state,
     ensure_player_state,
+    flush_account_state,
     mark_account_session_verified,
     normalize_player_state,
     record_result,
@@ -131,6 +132,93 @@ class PlayerStateTests(unittest.TestCase):
                     "データベースへ同期",
                 )
             store.close()
+
+    def test_account_state_roundtrip_restores_icon_and_full_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = AccountStore(sqlite_path=Path(directory) / "accounts.sqlite3")
+            original = default_player_state()
+            account = store.register(
+                "roundtrip_user", "password123", "復元テスト", original
+            )
+            token = store.create_session(account.username)
+            storage: dict[str, object] = {
+                ACCOUNT_USERNAME_STORAGE_KEY: account.username,
+                ACCOUNT_SESSION_STORAGE_KEY: token,
+            }
+            changed = update_selected_symbol(
+                original, original["collection"]["unlocked_symbols"][-1]
+            )
+            changed = update_basic_tutorial_stage(changed, 4)
+            changed = update_preference(changed, "high_contrast", True)
+            changed = update_profile(changed, tagline="再ログイン後も保持")
+
+            try:
+                with patch(
+                    "account_store.get_default_account_store", return_value=store
+                ):
+                    expected = store_player_state(storage, changed)
+                    self.assertTrue(flush_account_state(storage))
+
+                restored = normalize_player_state(
+                    store.load_player_state(account.username)
+                )
+                self.assertEqual(restored, expected)
+                self.assertEqual(
+                    restored["profile"]["selected_symbol"],
+                    changed["profile"]["selected_symbol"],
+                )
+                self.assertEqual(restored["tutorials"]["basic_stage"], 4)
+                self.assertTrue(restored["preferences"]["high_contrast"])
+            finally:
+                store.close()
+
+    def test_failed_account_sync_keeps_local_state_for_explicit_retry(self) -> None:
+        original = default_player_state()
+        changed = update_profile(original, tagline="失敗しても消さない")
+        storage: dict[str, object] = {
+            ACCOUNT_USERNAME_STORAGE_KEY: "retry_user",
+            ACCOUNT_SESSION_STORAGE_KEY: "retry-session-token",
+        }
+        store = MagicMock()
+        store.save_player_state_for_session.side_effect = [
+            AccountDatabaseError("temporary database failure"),
+            True,
+        ]
+
+        with patch("account_store.get_default_account_store", return_value=store):
+            locally_stored = store_player_state(storage, changed)
+            self.assertEqual(storage[PLAYER_STATE_KEY], locally_stored)
+            self.assertIn(ACCOUNT_SYNC_ERROR_STORAGE_KEY, storage)
+            self.assertIn(
+                "端末側の最新データは保持",
+                str(storage[ACCOUNT_SYNC_ERROR_STORAGE_KEY]),
+            )
+
+            self.assertTrue(flush_account_state(storage))
+
+        self.assertEqual(storage[PLAYER_STATE_KEY], locally_stored)
+        self.assertNotIn(ACCOUNT_SYNC_ERROR_STORAGE_KEY, storage)
+        self.assertEqual(store.save_player_state_for_session.call_count, 2)
+        first_state = store.save_player_state_for_session.call_args_list[0].args[2]
+        retried_state = store.save_player_state_for_session.call_args_list[1].args[2]
+        self.assertEqual(first_state, locally_stored)
+        self.assertEqual(retried_state, locally_stored)
+
+    def test_flush_reports_invalid_session_without_discarding_local_state(self) -> None:
+        state = update_profile(default_player_state(), tagline="まだ端末に残す")
+        storage: dict[str, object] = {
+            ACCOUNT_USERNAME_STORAGE_KEY: "expired_user",
+            ACCOUNT_SESSION_STORAGE_KEY: "expired-session-token",
+            PLAYER_STATE_KEY: state,
+        }
+        store = MagicMock()
+        store.save_player_state_for_session.return_value = False
+
+        with patch("account_store.get_default_account_store", return_value=store):
+            self.assertFalse(flush_account_state(storage))
+
+        self.assertEqual(storage[PLAYER_STATE_KEY], normalize_player_state(state))
+        self.assertIn(ACCOUNT_SYNC_ERROR_STORAGE_KEY, storage)
 
     def test_advanced_simulation_unlocks_only_after_all_core_cards(self) -> None:
         state = default_player_state()

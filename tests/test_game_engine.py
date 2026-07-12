@@ -2,6 +2,7 @@ import json
 import unittest
 
 from game_engine import (
+    AiDifficulty,
     GameState,
     MAX_ROUNDS,
     Phase,
@@ -237,6 +238,38 @@ class GameEngineTests(unittest.TestCase):
         played = play_ai_turn(state, "p2")
         self.assertEqual(played.to_dict(), first.to_dict())
         self.assertIn(played.card_id, OPPONENT_DECK)
+
+    def test_easy_ai_is_predictable_weaker_and_visits_all_three_lanes(self) -> None:
+        state = self.make_game()
+        chosen: list[tuple[str, str]] = []
+
+        for expected_lane in ("left", "center", "right"):
+            restored = GameState.from_dict(state.to_dict())
+            expected = choose_ai_order(
+                restored, "p2", difficulty=AiDifficulty.EASY
+            )
+            order = play_ai_turn(state, "p2", difficulty=AiDifficulty.EASY)
+            self.assertEqual(order.to_dict(), expected.to_dict())
+            self.assertEqual(order.lane_id, expected_lane)
+            chosen.append((order.card_id, order.lane_id))
+            submit_order(state, "p1", state.players["p1"].hand[0], "left")
+            resolve_round(state)
+
+        # The standard AI opens with useful control.  Easy AI intentionally
+        # wastes low-impact cards first and never reads the enemy board.
+        self.assertEqual(
+            chosen,
+            [
+                ("recon_2", "left"),
+                ("artillery_1", "center"),
+                ("artillery_2", "right"),
+            ],
+        )
+
+    def test_unknown_ai_difficulty_is_a_safe_rule_error(self) -> None:
+        with self.assertRaises(RuleViolation) as raised:
+            choose_ai_order(self.make_game(), "p2", difficulty="impossible")
+        self.assertEqual(raised.exception.code, "invalid_ai_difficulty")
 
     def test_ai_opens_multiple_fronts_instead_of_stacking_one_lane(self) -> None:
         state = new_game(

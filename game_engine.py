@@ -58,6 +58,18 @@ class Phase(StrEnum):
     COMPLETE = "complete"
 
 
+class AiDifficulty(StrEnum):
+    """Built-in computer-player profiles.
+
+    ``EASY`` deliberately ignores the opposing board and sophisticated card
+    combinations.  It exists for the solo training and casual fallback paths;
+    ``STANDARD`` retains the full multi-front heuristic for competitive modes.
+    """
+
+    EASY = "easy"
+    STANDARD = "standard"
+
+
 class RuleViolation(ValueError):
     """A safe, user-correctable game rule error.
 
@@ -814,8 +826,55 @@ def _estimated_enemy_power(
     return estimate, hidden_count
 
 
-def choose_ai_order(state: GameState, player_id: str) -> Order:
-    """Choose a legal order with a stable, multi-front heuristic.
+def _coerce_ai_difficulty(value: AiDifficulty | str) -> AiDifficulty:
+    try:
+        return AiDifficulty(str(value))
+    except ValueError as exc:
+        raise RuleViolation(
+            "invalid_ai_difficulty",
+            f"存在しないAI難易度です: {value}",
+        ) from exc
+
+
+def _choose_easy_ai_order(state: GameState, player_id: str) -> Order:
+    """Choose a predictable, intentionally forgiving training order.
+
+    The easy computer cycles left -> center -> right without reading the
+    opponent.  Within that lane it plays the card with the *smallest* immediate
+    power increase, so it commonly makes beginner-like mistakes such as using
+    support before establishing control or deploying heavy units without
+    supply.  It still visits all three lanes and always returns a legal,
+    deterministic order.
+    """
+
+    player = _player(state, player_id)
+    lane_id = LANE_IDS[(state.round_no - 1) % len(LANE_IDS)]
+    current = calculate_lane_power(state, lane_id, player_id)
+    candidates: list[tuple[int, int, int, str]] = []
+    for index, card_id in enumerate(player.hand):
+        card = lookup_card(card_id)
+        projected = _project_lane_power(current, card)
+        candidates.append((projected.total - current.total, card.cost, index, card_id))
+    _, _, _, card_id = min(candidates)
+    return Order(
+        player_id=player_id,
+        card_id=card_id,
+        lane_id=lane_id,
+        round_no=state.round_no,
+        formation_id="native",
+    )
+
+
+def choose_ai_order(
+    state: GameState,
+    player_id: str,
+    *,
+    difficulty: AiDifficulty | str = AiDifficulty.STANDARD,
+) -> Order:
+    """Choose a legal order using the requested computer-player profile.
+
+    ``STANDARD`` uses the stable multi-front heuristic described below.
+    ``EASY`` is intentionally predictable and weaker for solo practice.
 
     The AI aims to finish with at least two lanes instead of repeatedly adding
     power to one safe lane. It weighs the easiest lane to capture, threatened
@@ -829,6 +888,9 @@ def choose_ai_order(state: GameState, player_id: str) -> Order:
     player = _player(state, player_id)
     _require(player_id not in state.orders, "order_already_submitted", "AIの命令は確定済みです。")
     _require(bool(player.hand), "empty_hand", "AIの手札がありません。")
+    resolved_difficulty = _coerce_ai_difficulty(difficulty)
+    if resolved_difficulty is AiDifficulty.EASY:
+        return _choose_easy_ai_order(state, player_id)
     opponent_id = _opponent_id(state, player_id)
 
     latest_winners = {
@@ -916,8 +978,13 @@ def choose_ai_order(state: GameState, player_id: str) -> Order:
     )
 
 
-def play_ai_turn(state: GameState, player_id: str) -> Order:
-    order = choose_ai_order(state, player_id)
+def play_ai_turn(
+    state: GameState,
+    player_id: str,
+    *,
+    difficulty: AiDifficulty | str = AiDifficulty.STANDARD,
+) -> Order:
+    order = choose_ai_order(state, player_id, difficulty=difficulty)
     return submit_order(
         state,
         order.player_id,
@@ -1152,13 +1219,14 @@ def play_round_with_ai(
     *,
     ai_id: str | None = None,
     formation_id: str | None = None,
+    ai_difficulty: AiDifficulty | str = AiDifficulty.STANDARD,
 ) -> RoundResolution:
     """Convenience transaction for a local human-versus-AI screen."""
 
     resolved_ai_id = ai_id if ai_id is not None else _opponent_id(state, human_id)
     _require(resolved_ai_id != human_id, "duplicate_player", "AIと人間のIDが同じです。")
     submit_order(state, human_id, card_id, lane_id, formation_id)
-    play_ai_turn(state, resolved_ai_id)
+    play_ai_turn(state, resolved_ai_id, difficulty=ai_difficulty)
     return resolve_round(state)
 
 
@@ -1218,6 +1286,7 @@ def validate_state(state: GameState) -> None:
 
 
 __all__ = [
+    "AiDifficulty",
     "ARMOR_SUPPLY_BONUS",
     "FORMATION_SCALE",
     "LANE_IDS",

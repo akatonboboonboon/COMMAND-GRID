@@ -268,6 +268,19 @@ def store_player_state(
     return deepcopy(normalized)
 
 
+def flush_account_state(storage: MutableMapping[str, Any]) -> bool:
+    """Synchronize the latest local state while retaining it on any failure.
+
+    This explicit result is intended for boundaries such as logout: callers
+    can avoid discarding the browser's only up-to-date copy until PostgreSQL
+    has confirmed the write.  Guest storage has nothing to synchronize and is
+    therefore already considered flushed.
+    """
+
+    state = ensure_player_state(storage)
+    return _persist_account_state(storage, state)
+
+
 def mark_account_session_verified(
     storage: MutableMapping[str, Any],
     username: str,
@@ -342,7 +355,7 @@ def clear_account_session_cache(storage: MutableMapping[str, Any]) -> None:
 
 def _persist_account_state(
     storage: MutableMapping[str, Any], state: Mapping[str, Any]
-) -> None:
+) -> bool:
     """Best-effort account sync without making gameplay unavailable on DB errors."""
 
     username = storage.get(ACCOUNT_USERNAME_STORAGE_KEY)
@@ -354,7 +367,7 @@ def _persist_account_state(
         or not session_token
     ):
         storage.pop(ACCOUNT_SYNC_ERROR_STORAGE_KEY, None)
-        return
+        return True
     try:
         from account_store import AccountStoreError, get_default_account_store
 
@@ -368,11 +381,15 @@ def _persist_account_state(
             storage[ACCOUNT_SYNC_ERROR_STORAGE_KEY] = (
                 "ログインの有効期限が切れました。もう一度ログインしてください。"
             )
-            return
-    except AccountStoreError as error:
-        storage[ACCOUNT_SYNC_ERROR_STORAGE_KEY] = str(error)
+            return False
+    except AccountStoreError:
+        storage[ACCOUNT_SYNC_ERROR_STORAGE_KEY] = (
+            "データベースへ保存できませんでした。端末側の最新データは保持しています。"
+        )
+        return False
     else:
         storage.pop(ACCOUNT_SYNC_ERROR_STORAGE_KEY, None)
+        return True
 
 
 def update_preference(

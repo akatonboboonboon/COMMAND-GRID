@@ -627,32 +627,42 @@ class AccountStore:
         encoded_state = self._encode_player_state(player_state)
         current_time = self._time_text(self._utc_now(now))
         p = self._p
-        try:
-            with self._connection() as connection:
-                cursor = connection.execute(
-                    f"""
-                        UPDATE accounts
-                        SET player_state = {p}, updated_at = {p}
-                        WHERE username = {p}
-                          AND id = (
-                              SELECT account_id
-                              FROM sessions
-                              WHERE token_hash = {p} AND expires_at > {p}
-                          )
-                    """,
-                    (
-                        encoded_state,
-                        current_time,
-                        normalized_username,
-                        token_hash,
-                        current_time,
-                    ),
-                )
-                saved = cursor.rowcount == 1
-                connection.commit()
-                return saved
-        except Exception:
-            raise AccountDatabaseError("Player state could not be saved.") from None
+        attempts = 2 if self.backend == "postgresql" else 1
+        for attempt in range(attempts):
+            try:
+                with self._connection() as connection:
+                    cursor = connection.execute(
+                        f"""
+                            UPDATE accounts
+                            SET player_state = {p}, updated_at = {p}
+                            WHERE username = {p}
+                              AND id = (
+                                  SELECT account_id
+                                  FROM sessions
+                                  WHERE token_hash = {p} AND expires_at > {p}
+                              )
+                        """,
+                        (
+                            encoded_state,
+                            current_time,
+                            normalized_username,
+                            token_hash,
+                            current_time,
+                        ),
+                    )
+                    saved = cursor.rowcount == 1
+                    connection.commit()
+                    return saved
+            except Exception:
+                # Replacing the same JSON value is idempotent, so one retry is
+                # safe even if a broken connection lost the commit response.
+                # Other database operations are deliberately not retried here.
+                if attempt + 1 < attempts:
+                    continue
+                raise AccountDatabaseError(
+                    "Player state could not be saved."
+                ) from None
+        raise AssertionError("unreachable")
 
     def update_display_name(self, username: str, display_name: str) -> Account:
         """Change an account's public display name and return fresh metadata."""

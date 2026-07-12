@@ -334,6 +334,56 @@ class AccountStoreTests(unittest.TestCase):
         finally:
             store.close()
 
+    def test_postgresql_session_state_save_retries_one_checkout_failure(self) -> None:
+        store = AccountStore(sqlite_path=":memory:")
+        store.backend = "postgresql"
+        connection = MagicMock()
+        connection.execute.return_value.rowcount = 1
+        manager = MagicMock()
+        manager.__enter__.return_value = connection
+        manager.__exit__.return_value = False
+
+        try:
+            with patch.object(
+                store,
+                "_connection",
+                side_effect=[OSError("stale pooled connection"), manager],
+            ) as checkout:
+                saved = store.save_player_state_for_session(
+                    "session_user",
+                    "valid-session-token-that-is-long-enough",
+                    {"profile": {"display_name": "再試行成功"}},
+                )
+
+            self.assertTrue(saved)
+            self.assertEqual(checkout.call_count, 2)
+            connection.commit.assert_called_once_with()
+        finally:
+            store.close()
+
+    def test_postgresql_session_state_save_never_retries_more_than_once(self) -> None:
+        store = AccountStore(sqlite_path=":memory:")
+        store.backend = "postgresql"
+
+        try:
+            with patch.object(
+                store,
+                "_connection",
+                side_effect=OSError("database remains unavailable"),
+            ) as checkout:
+                with self.assertRaisesRegex(
+                    AccountDatabaseError, "Player state could not be saved"
+                ):
+                    store.save_player_state_for_session(
+                        "session_user",
+                        "valid-session-token-that-is-long-enough",
+                        {"profile": {"display_name": "保持される"}},
+                    )
+
+            self.assertEqual(checkout.call_count, 2)
+        finally:
+            store.close()
+
     def test_postgresql_pool_closes_when_schema_initialization_fails(self) -> None:
         pool = MagicMock()
         pool_class = MagicMock(return_value=pool)

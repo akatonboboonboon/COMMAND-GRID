@@ -46,6 +46,8 @@ class TutorialStage:
 
     ``choices`` is empty for reading/practice steps.  A stage with choices is
     a knowledge check; ``correct_choice`` contains the exact correct label.
+    The final live exercise intentionally leaves the static choice fields
+    empty because its nine turns are managed by the game UI.
     """
 
     id: str
@@ -590,7 +592,7 @@ def _number_explanation(card: UnitCard) -> str:
         supplied = base + 2
         return (
             f"自身の制圧と有効な支援は合計{base}です。補給0なら需要不足{demand}が引かれて"
-            f"戦線力{unsupported}相当、同じ戦線で需要を全部満たせば不足が消え、機甲ボーナス+2で"
+            f"戦線力{unsupported}相当、同じ戦線の総需要を全部満たせば不足が消え、機甲ボーナス+2で"
             f"戦線力{supplied}相当になります。"
         )
     if card.supply < 0:
@@ -632,11 +634,6 @@ def _number_explanation(card: UnitCard) -> str:
 
 def _build_tutorial(card: UnitCard) -> CardTutorial:
     guide = _GUIDES[card.id]
-    exercise = _EXERCISES[card.id]
-    exercise_choices = tuple(lane.label for lane in exercise.lanes)
-    correct_lane = next(
-        lane for lane in exercise.lanes if lane.id == exercise.correct_lane_id
-    )
     stages = (
         TutorialStage(
             "role",
@@ -667,22 +664,23 @@ def _build_tutorial(card: UnitCard) -> CardTutorial:
             "おすすめの相方と同じ戦線へ置く場面を一つ想像し、補給需要がある場合は合計需要も確認してください。",
         ),
         TutorialStage(
-            "check",
-            "5. 実戦配備演習",
-            "三つの戦線を比較し、このカードを最も生かせる場所へ実際に配備します。",
-            f"盤面の戦線力だけでなく、次の条件も確認します。{guide.caution}",
-            "左・中央・右の状況を一つずつ読み、カードを配備する戦線を選んでください。間違えてもカードや報酬は失われません。",
-            question=exercise.question,
-            choices=exercise_choices,
-            correct_choice=correct_lane.label,
-            success_message=exercise.success_message,
-            exercise_lanes=exercise.lanes,
+            "exercise",
+            "5. 9ターン実戦演習",
+            "両軍とも配備0枚から始め、9ターンで2戦線の確保を目指します。",
+            (
+                f"履修中の{card.name}は演習中に必ず手札へ入ります。"
+                "通常の対戦と同じ手順で一手ずつ配備し、カードの役割を盤面で確かめます。"
+            ),
+            (
+                f"{card.name}を少なくとも1回使用し、9ターン終了時に左・中央・右のうち"
+                "2戦線以上を確保してください。"
+            ),
         ),
     )
     return CardTutorial(
         card_id=card.id,
         title=f"{card.name} 基礎訓練",
-        intro=f"{card.name}の数字、置き場所、組み合わせを5段階で学びます。",
+        intro=f"{card.name}の数字と組み合わせを学び、最後に9ターンの実戦演習を行います。",
         stages=stages,
         reward_deck_id=card.id,
     )
@@ -770,8 +768,6 @@ def _validate_catalog() -> None:
     expected = set(CARD_INDEX)
     if set(_GUIDES) != expected:
         raise ValueError("Every card must have exactly one tutorial guide")
-    if set(_EXERCISES) != expected:
-        raise ValueError("Every card must have exactly one deployment exercise")
     if set(_DECK_SPECS) != expected:
         raise ValueError("Every card must have exactly one official deck")
     if len(TUTORIAL_INDEX) != len(CARD_TUTORIALS):
@@ -781,16 +777,31 @@ def _validate_catalog() -> None:
     for tutorial in CARD_TUTORIALS:
         if len(tutorial.stages) < 5:
             raise ValueError(f"Tutorial {tutorial.card_id} is not sufficiently staged")
-        check = tutorial.stages[-1]
-        if not check.choices or check.correct_choice not in check.choices:
-            raise ValueError(f"Tutorial {tutorial.card_id} has an invalid final check")
-        if check.id != "check" or len(check.exercise_lanes) != 3:
-            raise ValueError(f"Tutorial {tutorial.card_id} needs a three-lane exercise")
-        lane_ids = {lane.id for lane in check.exercise_lanes}
-        if lane_ids != {"left", "center", "right"}:
-            raise ValueError(f"Tutorial {tutorial.card_id} has invalid exercise lanes")
-        if tuple(lane.label for lane in check.exercise_lanes) != check.choices:
-            raise ValueError(f"Tutorial {tutorial.card_id} choices do not match its lanes")
+        exercise = tutorial.stages[-1]
+        if exercise.id != "exercise":
+            raise ValueError(f"Tutorial {tutorial.card_id} needs a final live exercise")
+        if (
+            exercise.question
+            or exercise.choices
+            or exercise.correct_choice
+            or exercise.success_message
+            or exercise.exercise_lanes
+        ):
+            raise ValueError(f"Tutorial {tutorial.card_id} embeds obsolete exercise choices")
+        exercise_copy = " ".join(
+            (exercise.summary, exercise.explanation, exercise.practice)
+        )
+        for required in (
+            "0枚",
+            "9ターン",
+            "2戦線",
+            "少なくとも1回使用",
+            CARD_INDEX[tutorial.card_id].name,
+        ):
+            if required not in exercise_copy:
+                raise ValueError(
+                    f"Tutorial {tutorial.card_id} exercise is missing {required}"
+                )
     for deck in OFFICIAL_DECKS:
         if len(deck.card_ids) != 12 or len(set(deck.card_ids)) != 12:
             raise ValueError(f"Official deck {deck.id} must contain 12 unique cards")

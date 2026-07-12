@@ -27,6 +27,40 @@ class BasicTutorialTests(unittest.TestCase):
             if lesson.kind == "card_choice":
                 self.assertTrue(set(dict(lesson.choices)).issubset(CARD_INDEX))
 
+    def test_choice_copy_is_balanced_and_does_not_reveal_the_answer(self) -> None:
+        giveaway_words = ("全部", "必ず", "どこでも", "正解", "不正解")
+        for lesson in BASIC_TUTORIAL_LESSONS:
+            if not lesson.choices:
+                continue
+            with self.subTest(lesson=lesson.id):
+                choice_ids = [choice_id for choice_id, _ in lesson.choices]
+                labels = [label for _, label in lesson.choices]
+                self.assertEqual(len(labels), 3)
+                self.assertEqual(len(set(choice_ids)), 3)
+                self.assertEqual(len(set(labels)), 3)
+                self.assertTrue(lesson.task.endswith("選んでください。"))
+                self.assertNotIn(dict(lesson.choices)[lesson.correct_choice], lesson.task)
+                self.assertNotIn(dict(lesson.choices)[lesson.correct_choice], lesson.hint)
+                self.assertFalse(
+                    any(word in label for word in giveaway_words for label in labels)
+                )
+                if lesson.kind == "choice":
+                    lengths = [len(label) for label in labels]
+                    self.assertLessEqual(max(lengths) - min(lengths), 4)
+
+    def test_correct_answers_use_all_three_positions_without_a_cycle(self) -> None:
+        positions = []
+        for lesson in BASIC_TUTORIAL_LESSONS:
+            if lesson.choices:
+                choice_ids = [choice_id for choice_id, _ in lesson.choices]
+                positions.append(choice_ids.index(lesson.correct_choice))
+
+        self.assertEqual(
+            {position: positions.count(position) for position in range(3)},
+            {0: 2, 1: 3, 2: 2},
+        )
+        self.assertNotEqual(positions, [index % 3 for index in range(len(positions))])
+
     def test_lesson_lookup_uses_stable_ids(self) -> None:
         self.assertEqual(get_basic_lesson("deploy").kind, "deploy")
         with self.assertRaises(KeyError):
@@ -56,7 +90,7 @@ class BasicTutorialTests(unittest.TestCase):
         )
         rounds = get_basic_lesson("rounds")
         self.assertEqual(rounds.correct_choice, "nine")
-        self.assertEqual(dict(rounds.choices)["nine"], "9枚")
+        self.assertEqual(dict(rounds.choices)["nine"], "未使用は9枚になる")
         self.assertIn("9ラウンド", full_copy)
         self.assertNotIn("6ラウンド", full_copy)
         self.assertNotIn("最低6枚", full_copy)

@@ -6,7 +6,6 @@ from tutorial_data import (
     OFFICIAL_DECKS,
     OFFICIAL_DECK_INDEX,
     TUTORIAL_INDEX,
-    LaneExercise,
     deck_missing_card_ids,
     deck_missing_cards,
     deck_owned_cards_in_order,
@@ -32,72 +31,47 @@ class TutorialDataTests(unittest.TestCase):
                     self.assertTrue(stage.explanation.strip())
                     self.assertTrue(stage.practice.strip())
 
-    def test_every_tutorial_finishes_with_a_three_lane_deployment_exercise(self) -> None:
+    def test_every_tutorial_finishes_with_a_nine_turn_live_exercise(self) -> None:
         for tutorial in CARD_TUTORIALS:
             with self.subTest(card=tutorial.card_id):
                 final_stage = tutorial.stages[-1]
-                self.assertEqual(final_stage.id, "check")
-                self.assertEqual(final_stage.title, "5. 実戦配備演習")
-                self.assertTrue(final_stage.question)
-                self.assertEqual(len(final_stage.choices), 3)
-                self.assertIn(final_stage.correct_choice, final_stage.choices)
-                self.assertTrue(final_stage.success_message)
-                self.assertEqual(len(final_stage.exercise_lanes), 3)
-                self.assertEqual(
-                    tuple(lane.id for lane in final_stage.exercise_lanes),
-                    ("left", "center", "right"),
+                self.assertEqual(final_stage.id, "exercise")
+                self.assertEqual(final_stage.title, "5. 9ターン実戦演習")
+                self.assertFalse(final_stage.question)
+                self.assertFalse(final_stage.choices)
+                self.assertFalse(final_stage.correct_choice)
+                self.assertFalse(final_stage.success_message)
+                self.assertFalse(final_stage.exercise_lanes)
+                exercise_copy = " ".join(
+                    (
+                        final_stage.summary,
+                        final_stage.explanation,
+                        final_stage.practice,
+                    )
                 )
-                self.assertEqual(
-                    tuple(lane.label for lane in final_stage.exercise_lanes),
-                    final_stage.choices,
-                )
-                for lane in final_stage.exercise_lanes:
-                    self.assertIsInstance(lane, LaneExercise)
-                    self.assertTrue(lane.situation.strip())
-                    self.assertIs(type(lane.player_power), int)
-                    self.assertIs(type(lane.enemy_power), int)
-                    self.assertGreaterEqual(lane.player_power, 0)
-                    self.assertGreaterEqual(lane.enemy_power, 0)
+                for required in (
+                    "0枚",
+                    "9ターン",
+                    "2戦線",
+                    CARD_INDEX[tutorial.card_id].name,
+                    "少なくとも1回使用",
+                ):
+                    self.assertIn(required, exercise_copy)
 
-    def test_only_the_final_stage_is_an_interactive_lane_exercise(self) -> None:
+    def test_static_course_data_contains_no_obsolete_answer_buttons(self) -> None:
         for tutorial in CARD_TUTORIALS:
             with self.subTest(card=tutorial.card_id):
-                self.assertTrue(all(not stage.exercise_lanes for stage in tutorial.stages[:-1]))
-                self.assertTrue(tutorial.stages[-1].exercise_lanes)
+                self.assertTrue(all(not stage.choices for stage in tutorial.stages))
+                self.assertTrue(all(not stage.correct_choice for stage in tutorial.stages))
+                self.assertTrue(all(not stage.exercise_lanes for stage in tutorial.stages))
 
-    def test_each_card_has_its_own_board_situation_and_answer_reason(self) -> None:
-        scenarios = set()
-        success_messages = set()
+    def test_each_live_exercise_names_its_featured_card(self) -> None:
         for tutorial in CARD_TUTORIALS:
             final_stage = tutorial.stages[-1]
-            scenario = tuple(
-                (
-                    lane.id,
-                    lane.situation,
-                    lane.player_power,
-                    lane.enemy_power,
-                )
-                for lane in final_stage.exercise_lanes
+            self.assertIn(
+                CARD_INDEX[tutorial.card_id].name,
+                final_stage.explanation + final_stage.practice,
             )
-            scenarios.add(scenario)
-            success_messages.add(final_stage.success_message)
-
-        self.assertEqual(len(scenarios), len(CARD_TUTORIALS))
-        self.assertEqual(len(success_messages), len(CARD_TUTORIALS))
-
-    def test_exercise_answer_positions_do_not_favor_one_lane(self) -> None:
-        answers = [
-            next(
-                lane.id
-                for lane in tutorial.stages[-1].exercise_lanes
-                if lane.label == tutorial.stages[-1].correct_choice
-            )
-            for tutorial in CARD_TUTORIALS
-        ]
-        self.assertEqual(
-            {lane_id: answers.count(lane_id) for lane_id in ("left", "center", "right")},
-            {"left": 6, "center": 6, "right": 6},
-        )
 
     def test_tutorials_link_to_their_featured_official_decks(self) -> None:
         for tutorial in CARD_TUTORIALS:

@@ -1115,6 +1115,11 @@ a:focus-visible {
   transform: translateY(-3px);
 }
 
+.hand-card--featured:not(.hand-card--selected) {
+  border-color: #d5a72d !important;
+  box-shadow: inset 0 0 0 2px rgba(244, 201, 93, 0.18) !important;
+}
+
 .battle-side {
   position: sticky;
   top: 80px;
@@ -2506,6 +2511,26 @@ body.cg-patterns-off .hero-main::after {
     -webkit-overflow-scrolling: touch;
   }
 
+  .tutorial-exercise-lanes {
+    display: flex;
+    width: calc(100% + 24px);
+    overflow-x: auto;
+    gap: 10px;
+    margin-right: -12px;
+    margin-left: -12px;
+    padding: 2px 12px 14px;
+    scroll-padding-inline: 12px;
+    scroll-snap-type: x mandatory;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .tutorial-exercise-lanes .battle-lane {
+    flex: 0 0 clamp(270px, 82vw, 360px);
+    scroll-snap-align: center;
+    scroll-snap-stop: always;
+  }
+
   .battle-board-column .battle-lane {
     flex: 0 0 clamp(280px, 82vw, 380px);
     scroll-snap-align: center;
@@ -2728,6 +2753,7 @@ body.cg-patterns-off .hero-main::after {
   }
 
   .battle-board-column .lane-grid,
+  .tutorial-exercise-lanes,
   .tutorial-lane-grid,
   .simulation-theater-grid,
   .simulation-card-grid,
