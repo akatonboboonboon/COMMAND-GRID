@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from account_store import AccountDatabaseError, AccountStore
-from advanced_game_data import ADVANCED_CARDS, ADVANCED_STARTER_DECK
+from advanced_game_data import ADVANCED_CARD_INDEX, ADVANCED_STARTER_DECK
 from game_data import CARDS, STARTER_DECK
 from player_state import (
     ACCOUNT_SESSION_CACHE_STORAGE_KEY,
@@ -245,7 +245,7 @@ class PlayerStateTests(unittest.TestCase):
         all_cards_state = unlock_collection(
             default_player_state(), cards=[card.id for card in CARDS]
         )
-        chosen = [card.id for card in ADVANCED_CARDS[:12]]
+        chosen = list(ADVANCED_STARTER_DECK[:12])
         updated = update_advanced_deck(all_cards_state, chosen)
         self.assertEqual(updated["progression"]["advanced_deck"], chosen)
 
@@ -253,6 +253,8 @@ class PlayerStateTests(unittest.TestCase):
             chosen[:11],
             [*chosen, chosen[0]],
             [*chosen[:11], "missing"],
+            [*chosen[:11], "advanced_frames_01"],
+            [*chosen[:11], "advanced_echelon_01"],
         ):
             with self.subTest(deck=bad_deck):
                 with self.assertRaises(ValueError):
@@ -268,8 +270,60 @@ class PlayerStateTests(unittest.TestCase):
         )
         self.assertFalse(repaired["progression"]["simulation_unlocked"])
         self.assertEqual(
-            repaired["progression"]["advanced_deck"], list(ADVANCED_STARTER_DECK)
+            repaired["progression"]["advanced_deck"],
+            list(ADVANCED_STARTER_DECK[:12]),
         )
+
+    def test_advanced_deck_repair_removes_nonplayable_cards_and_refills(self) -> None:
+        preserved = [
+            ADVANCED_STARTER_DECK[5],
+            ADVANCED_STARTER_DECK[2],
+            *ADVANCED_STARTER_DECK[10:20],
+        ]
+        raw_deck = [
+            preserved[0],
+            "advanced_frames_01",
+            preserved[1],
+            "advanced_echelon_01",
+            *preserved[2:],
+        ]
+
+        repaired = normalize_player_state(
+            {"progression": {"advanced_deck": raw_deck}}
+        )["progression"]["advanced_deck"]
+
+        self.assertEqual(len(raw_deck), 14)
+        self.assertEqual(len(repaired), 14)
+        self.assertEqual(repaired[: len(preserved)], preserved)
+        self.assertEqual(len(repaired), len(set(repaired)))
+        self.assertTrue(set(repaired).issubset(ADVANCED_CARD_INDEX))
+        self.assertNotIn("advanced_frames_01", repaired)
+        self.assertNotIn("advanced_echelon_01", repaired)
+
+        repaired_minimum = normalize_player_state(
+            {
+                "progression": {
+                    "advanced_deck": [
+                        "advanced_frames_01",
+                        "advanced_echelon_01",
+                    ]
+                }
+            }
+        )["progression"]["advanced_deck"]
+        self.assertEqual(len(repaired_minimum), 12)
+
+        repaired_maximum = normalize_player_state(
+            {
+                "progression": {
+                    "advanced_deck": [
+                        *ADVANCED_STARTER_DECK,
+                        "advanced_frames_01",
+                        "advanced_echelon_01",
+                    ]
+                }
+            }
+        )["progression"]["advanced_deck"]
+        self.assertEqual(repaired_maximum, list(ADVANCED_STARTER_DECK))
 
     def test_tutorial_progress_normalizes_corrupt_and_legacy_values(self) -> None:
         state = normalize_player_state(

@@ -2242,6 +2242,31 @@ body.cg-patterns-off .hero-main::after {
   white-space: nowrap;
 }
 
+.simulation-card__symbol--ground,
+.simulation-card__symbol--surface {
+  width: 60px;
+  height: 60px;
+  border-radius: 50%;
+}
+
+.simulation-card__symbol--air,
+.simulation-card__symbol--space {
+  width: 70px;
+  height: 58px;
+  border-radius: 50% 50% 8px 8px / 68% 68% 12px 12px;
+}
+
+.simulation-card__symbol--space {
+  border-bottom-style: double;
+}
+
+.simulation-card__symbol--subsurface {
+  width: 70px;
+  height: 58px;
+  border-top-color: transparent;
+  border-radius: 8px 8px 50% 50% / 12px 12px 68% 68%;
+}
+
 .simulation-card__stats {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -2298,6 +2323,14 @@ body.cg-patterns-off .hero-main::after {
   grid-template-columns: repeat(4, minmax(150px, 1fr));
   gap: 11px;
   width: 100%;
+}
+
+.simulation-filter-bar--three {
+  grid-template-columns: repeat(3, minmax(170px, 1fr));
+}
+
+.simulation-scale-select {
+  min-width: min(320px, 100%);
 }
 
 @media (max-width: 1180px) {

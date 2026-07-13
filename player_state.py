@@ -866,6 +866,11 @@ def _normalize_progression(
 def _normalize_advanced_deck(raw: object) -> list[str]:
     if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
         return list(ADVANCED_STARTER_DECK)
+
+    target_size = min(
+        MAX_ADVANCED_DECK_SIZE,
+        max(MIN_ADVANCED_DECK_SIZE, len(raw)),
+    )
     result: list[str] = []
     for card_id in raw:
         if (
@@ -874,10 +879,16 @@ def _normalize_advanced_deck(raw: object) -> list[str]:
             and card_id not in result
         ):
             result.append(card_id)
-        if len(result) == MAX_ADVANCED_DECK_SIZE:
+        if len(result) == target_size:
             break
-    if len(result) < MIN_ADVANCED_DECK_SIZE:
-        return list(ADVANCED_STARTER_DECK)
+
+    # Older saves may contain cards that are no longer playable.  Keep the
+    # surviving user order, then refill to the saved deck's intended size.
+    for card_id in (*ADVANCED_STARTER_DECK, *ADVANCED_CARD_INDEX):
+        if card_id not in result:
+            result.append(card_id)
+        if len(result) == target_size:
+            break
     return result
 
 

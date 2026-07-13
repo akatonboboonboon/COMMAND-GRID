@@ -22,15 +22,17 @@ from account_store import (
     get_default_account_store,
 )
 from advanced_game_data import (
-    ADVANCED_ENTRY_KIND_CARD,
-    ADVANCED_ENTRY_KIND_SCALE,
-    ADVANCED_ENTRY_KINDS,
     ADVANCED_CARDS,
+    ADVANCED_SCALE_CARDS,
     ADVANCED_STARTER_DECK,
+    DEFAULT_ADVANCED_SCALE_ID,
     AdvancedCard,
-    advanced_entry_kind,
     advanced_name_and_scale,
+    can_attach_advanced_scale,
     get_advanced_card,
+    get_advanced_scale,
+    intrinsic_advanced_scale_id,
+    scaled_advanced_stats,
     search_advanced_cards,
 )
 from basic_tutorial import BASIC_TUTORIAL_LESSONS, BasicLesson
@@ -67,6 +69,8 @@ from tutorial_match import (
     tutorial_match_status,
 )
 from symbol_catalog import (
+    Domain,
+    PlayKind,
     STAGE_LABELS,
     SYMBOL_CATALOG,
     SYMBOL_FAMILIES,
@@ -564,21 +568,68 @@ def account_icon(
     ui.label(token).classes(classes).props(f'role="img" aria-label="{label}"')
 
 
+def advanced_frame_kind(card: AdvancedCard) -> str:
+    """Map catalog metadata to one of the reference sheet's display frames."""
+
+    if card.play_kind is not PlayKind.ENTITY:
+        return "unit"
+    if card.domain is Domain.LAND:
+        return "ground"
+    if card.domain is Domain.AIR:
+        return "space" if card.name == "衛星" else "air"
+    if card.domain is Domain.SEA:
+        return "subsurface" if "潜水艦" in card.name or card.name == "機雷" else "surface"
+    return "ground"
+
+
 def advanced_symbol(card: AdvancedCard, *, classes: str = "simulation-card__symbol") -> None:
     symbol = SYMBOL_INDEX.get(card.symbol_id)
-    ui.label(symbol.token if symbol else "□").classes(classes).props(
-        f'role="img" aria-label="{card.name}の記号"'
+    frame_kind = advanced_frame_kind(card)
+    ui.label(symbol.token if symbol else "□").classes(
+        f"{classes} simulation-card__symbol--{frame_kind}"
+    ).props(
+        f'role="img" data-frame="{frame_kind}" aria-label="{card.name}の記号"'
     )
 
 
-def advanced_identity_label(card: AdvancedCard) -> str:
+def advanced_identity_label(card: AdvancedCard, scale_id: str | None = None) -> str:
     name, scale = advanced_name_and_scale(card)
+    resolved_scale_id = scale_id or intrinsic_advanced_scale_id(card)
+    if resolved_scale_id is not None:
+        scale = get_advanced_scale(resolved_scale_id).name
     parts = []
     if name is not None:
         parts.append(f"カード名：{name}")
     if scale is not None:
         parts.append(f"部隊規模：{scale}")
     return "／".join(parts)
+
+
+def advanced_scale_effect_text(
+    scale_id: str,
+    card: AdvancedCard | None = None,
+) -> str:
+    scale = get_advanced_scale(scale_id)
+    effective = scaled_advanced_stats(card, scale_id) if card is not None else None
+    labels = (
+        ("制圧", "control", scale.control_delta),
+        ("支援", "support", scale.support_delta),
+        ("偵察", "recon", scale.recon_delta),
+        ("補給", "supply", scale.supply_delta),
+        ("指揮", "command", scale.command_delta),
+        ("機動", "mobility", scale.mobility_delta),
+    )
+    changes = "　".join(
+        f"{label}{value:+d}"
+        for label, field, nominal in labels
+        for value in (
+            (effective[field] - getattr(card, field))
+            if effective is not None and card is not None
+            else nominal,
+        )
+        if value
+    )
+    return changes or "能力補正なし"
 
 
 def primary_card_stats(
@@ -594,20 +645,27 @@ def primary_card_stats(
     )
 
 
-def advanced_stats(card: AdvancedCard) -> None:
+def advanced_stats(card: AdvancedCard, scale_id: str | None = None) -> None:
+    intrinsic_scale = intrinsic_advanced_scale_id(card)
+    values = (
+        scaled_advanced_stats(card, scale_id or intrinsic_scale)
+        if scale_id is not None or intrinsic_scale is not None
+        else {field: getattr(card, field) for field in ("control", "support", "recon", "supply", "command", "mobility")}
+    )
     with ui.element("div").classes("simulation-card__stats"):
-        for label, value in primary_card_stats(card):
+        for label, field in (("制圧", "control"), ("支援", "support"), ("偵察", "recon"), ("補給", "supply")):
             with ui.element("div").classes(
                 "simulation-card__stat simulation-card__stat--primary"
             ):
                 ui.label(label).classes("muted")
-                ui.label(value).classes("mono font-bold")
-        for label, value in (("指揮", card.command), ("機動", card.mobility)):
+                value = values[field]
+                ui.label(f"{value:+d}" if field == "supply" else str(value)).classes("mono font-bold")
+        for label, field in (("指揮", "command"), ("機動", "mobility")):
             with ui.element("div").classes(
                 "simulation-card__stat simulation-card__stat--extra"
             ):
                 ui.label(label).classes("muted")
-                ui.label(str(value)).classes("mono font-bold")
+                ui.label(str(values[field])).classes("mono font-bold")
 
 
 def card_stats(card: UnitCard) -> None:
@@ -888,7 +946,7 @@ def card_tutorial_tile(tutorial: CardTutorial, player: dict[str, object]) -> Non
 
 @contextmanager
 def page_shell(active: str, eyebrow: str, title: str, subtitle: str) -> Iterator[None]:
-    ui.add_head_html('<link rel="stylesheet" href="/static/styles.css?v=20260713-1">')
+    ui.add_head_html('<link rel="stylesheet" href="/static/styles.css?v=20260713-2">')
     ui.colors(
         primary="#60AFFF",
         secondary="#55C7D9",
@@ -3701,7 +3759,7 @@ def record_simulation_completion(state: SimulationState) -> None:
 def simulation_page() -> None:
     with page_shell(
         "/simulation", "ADVANCED SIMULATION", "本格統合作戦シミュレーション",
-        "基本18枚を集めた後の上級ルールです。全201記号をカードとして使い、12ターンで3作戦域を争います。",
+        "基本18枚を集めた後の上級ルールです。180枚の実体カードと部隊規模14種を使い、12ターンで3作戦域を争います。",
     ):
         player = ensure_player_state(app.storage.user)
         owned_count = len(player["collection"]["owned_cards"])
@@ -3725,7 +3783,7 @@ def simulation_page() -> None:
                 section_heading("開放後に増える要素", "いきなり覚える必要はありません。画面内で意味を説明します。")
                 with ui.element("div").classes("three-grid mt-3"):
                     for title, text, icon in (
-                        ("全201カード", "参照画像のすべての記号が、検索できるカードになります。", "library_books"),
+                        ("180枚の実体カード", "部隊・装備・施設だけをカードにし、枠などの表示情報は除外します。", "library_books"),
                         ("12ターン", "通常の9ラウンドより長く、複数の作戦を組み立てます。", "schedule"),
                         ("統合作戦", "制圧・支援・偵察・補給に、指揮・機動・領域連携が加わります。", "hub"),
                     ):
@@ -3738,7 +3796,11 @@ def simulation_page() -> None:
         player = update_state_mode(player, "simulation")
         player = store_player_state(app.storage.user, player)
         state = load_or_start_simulation(player)
-        selection: dict[str, str | None] = {"card": None, "theater": None}
+        selection: dict[str, str | None] = {
+            "card": None,
+            "theater": None,
+            "scale": None,
+        }
 
         def select_simulation_card(card_id: str) -> None:
             active = load_or_start_simulation(ensure_player_state(app.storage.user))
@@ -3747,11 +3809,31 @@ def simulation_page() -> None:
             if card_id not in active.players["player"].hand:
                 ui.notify("そのカードはすでに使用しました。", type="warning")
                 return
+            card = get_advanced_card(card_id)
             selection["card"] = card_id
+            selection["scale"] = (
+                intrinsic_advanced_scale_id(card)
+                or (DEFAULT_ADVANCED_SCALE_ID if can_attach_advanced_scale(card) else None)
+            )
             simulation_board.refresh()
 
         def select_theater(theater_id: str) -> None:
             selection["theater"] = theater_id
+            simulation_board.refresh()
+
+        def select_simulation_scale(scale_id: str) -> None:
+            card_id = selection.get("card")
+            if not card_id:
+                return
+            card = get_advanced_card(card_id)
+            if not can_attach_advanced_scale(card):
+                return
+            try:
+                get_advanced_scale(scale_id)
+            except KeyError:
+                ui.notify("存在しない部隊規模です。もう一度選んでください。", type="negative")
+                return
+            selection["scale"] = scale_id
             simulation_board.refresh()
 
         def execute_simulation_order() -> None:
@@ -3762,12 +3844,18 @@ def simulation_page() -> None:
                 return
             active = load_or_start_simulation(ensure_player_state(app.storage.user))
             try:
-                play_simulation_round(active, "player", card_id, theater_id)
+                play_simulation_round(
+                    active,
+                    "player",
+                    card_id,
+                    theater_id,
+                    scale_id=selection.get("scale"),
+                )
             except SimulationRuleError as error:
                 ui.notify(str(error), type="negative")
                 return
             save_simulation(active)
-            selection.update(card=None, theater=None)
+            selection.update(card=None, theater=None, scale=None)
             if active.phase is SimulationPhase.COMPLETE:
                 record_simulation_completion(active)
                 ui.notify("12ターンの結果を確定しました。", type="positive")
@@ -3777,7 +3865,7 @@ def simulation_page() -> None:
 
         def reset_simulation() -> None:
             start_fresh_simulation(ensure_player_state(app.storage.user))
-            selection.update(card=None, theater=None)
+            selection.update(card=None, theater=None, scale=None)
             simulation_board.refresh()
             ui.notify("新しい12ターン作戦を開始しました。", type="positive")
 
@@ -3867,7 +3955,10 @@ def simulation_page() -> None:
                         ui.label("味方の配備").classes("muted text-xs")
                         ui.label(
                             "・".join(
-                                advanced_identity_label(get_advanced_card(item.card_id))
+                                advanced_identity_label(
+                                    get_advanced_card(item.card_id),
+                                    getattr(item, "scale_id", None),
+                                )
                                 for item in own_units[-3:]
                             )
                             or "まだ配備なし"
@@ -3887,7 +3978,10 @@ def simulation_page() -> None:
                         ui.label(f"手札（残り {len(human.hand)}枚）").classes("section-title")
                         ui.label("上段の制圧・支援・偵察・補給は全カード共通です。指揮・機動は下段に表示します。").classes("section-subtitle")
                     chip(
-                        advanced_identity_label(get_advanced_card(str(selection["card"])))
+                        advanced_identity_label(
+                            get_advanced_card(str(selection["card"])),
+                            selection.get("scale"),
+                        )
                         if selection.get("card") else "カード未選択",
                         "green" if selection.get("card") else "",
                     )
@@ -3902,19 +3996,47 @@ def simulation_page() -> None:
                         with card_element:
                             with ui.row().classes("w-full items-start justify-between gap-2 no-wrap"):
                                 with ui.column().classes("gap-0 min-w-0"):
-                                    ui.label(
-                                        f"{advanced_entry_kind(card)}・{card.domain.value}"
-                                    ).classes("page-eyebrow")
+                                    ui.label(f"{card.play_kind.value}・{card.domain.value}").classes("page-eyebrow")
                                     ui.label(advanced_identity_label(card)).classes("font-bold text-sm")
                                 chip(card.rarity, "yellow" if card.rarity != "標準" else "")
                             advanced_symbol(card)
                             ui.label(card.plain_role).classes("muted text-xs")
-                            advanced_stats(card)
+                            selected_scale = (
+                                selection.get("scale")
+                                if selection.get("card") == card_id
+                                else None
+                            )
+                            advanced_stats(card, selected_scale)
 
                 with ui.element("div").classes("simulation-controls"):
+                    selected_card = (
+                        get_advanced_card(str(selection["card"]))
+                        if selection.get("card")
+                        else None
+                    )
+                    if selected_card and can_attach_advanced_scale(selected_card):
+                        ui.select(
+                            {scale.id: scale.name for scale in ADVANCED_SCALE_CARDS},
+                            value=selection.get("scale") or DEFAULT_ADVANCED_SCALE_ID,
+                            label="この部隊へ付ける部隊規模",
+                            on_change=lambda event: select_simulation_scale(str(event.value)),
+                        ).props("outlined options-dense").classes("filter-control simulation-scale-select")
+                        chosen_scale = str(selection.get("scale") or DEFAULT_ADVANCED_SCALE_ID)
+                        ui.label(
+                            advanced_scale_effect_text(chosen_scale, selected_card)
+                        ).classes("muted text-xs")
+                        ui.label(get_advanced_scale(chosen_scale).description).classes("section-subtitle")
+                    elif selected_card and intrinsic_advanced_scale_id(selected_card):
+                        fixed_scale = str(intrinsic_advanced_scale_id(selected_card))
+                        chip(f"固定部隊規模：{get_advanced_scale(fixed_scale).name}", "green")
+                        ui.label(
+                            advanced_scale_effect_text(fixed_scale, selected_card)
+                        ).classes("muted text-xs")
+                    elif selected_card:
+                        ui.label("装備・施設カードには部隊規模を付けません。").classes("muted text-xs")
                     if selection.get("card") and selection.get("theater"):
                         ui.label(
-                            f"予定：{advanced_identity_label(get_advanced_card(str(selection['card'])))}を"
+                            f"予定：{advanced_identity_label(get_advanced_card(str(selection['card'])), selection.get('scale'))}を"
                             f"{THEATER_LABELS[str(selection['theater'])]}へ配備"
                         ).classes("font-bold")
                     else:
@@ -3929,6 +4051,7 @@ def simulation_page() -> None:
             with ui.expansion("上級ルールの数字を確認", icon="menu_book").classes("details-expansion"):
                 with ui.element("div").classes("three-grid mt-3"):
                     for title, body in (
+                        ("部隊規模", "部隊カードを出すときに付けます。大部隊は制圧・指揮が高い代わりに補給と機動が重くなります。"),
                         ("指揮", "同じ作戦域の指揮合計3ごとに+1。最大+6です。"),
                         ("機動", "同じ作戦域の機動合計5ごとに+1。最大+4です。"),
                         ("領域連携", "陸・海・空宇宙など異なる領域が2種類以上そろうと、追加1領域ごとに+2です。"),
@@ -3944,7 +4067,7 @@ def simulation_page() -> None:
 def simulation_deck_page() -> None:
     with page_shell(
         "/simulation", "ADVANCED DECK", "本格シミュレーション用デッキ",
-        "全201カードから12〜24枚を選びます。最初は自動作成された24枚のままで問題ありません。",
+        "プレイ可能な180枚から12〜24枚を選びます。枠は表示情報、部隊規模は配備時の編制効果として扱います。",
     ):
         player = ensure_player_state(app.storage.user)
         if not player["progression"]["simulation_unlocked"]:
@@ -3996,10 +4119,10 @@ def simulation_deck_page() -> None:
 
         with ui.element("section").classes("simulation-hero"):
             with ui.column().classes("gap-1 flex-1"):
-                chip("全201カード使用可能", "green")
-                ui.label("カード名と部隊規模を分けて選べます").classes("text-2xl font-bold")
+                chip("プレイ可能カード180枚", "green")
+                ui.label("実体のある部隊・装備・施設だけを編制").classes("text-2xl font-bold")
                 ui.label(
-                    "部隊・装備など187件と、総軍・師団・中隊などの部隊規模14件を名称区分で切り替えます。"
+                    "枠7種は記号表示に使用し、総軍・師団・中隊など14種の部隊規模は戦闘で部隊カードへ付けます。"
                 ).classes("section-subtitle")
             with ui.row().classes("gap-2"):
                 primary_button("このデッキで新規作戦", icon="play_arrow", on_click=start_selected_simulation)
@@ -4022,24 +4145,18 @@ def simulation_deck_page() -> None:
                         advanced_symbol(card)
                         ui.label(advanced_identity_label(card)).classes("font-bold text-xs")
                         ui.label(
-                            f"{advanced_entry_kind(card)}・{card.domain.value}・{card.play_kind.value}"
+                            f"{card.domain.value}・{card.play_kind.value}"
                         ).classes("muted text-xs")
 
         selected_deck()
 
         domain_values = ["すべて", *dict.fromkeys(card.domain.value for card in ADVANCED_CARDS)]
         kind_values = ["すべて", *dict.fromkeys(card.play_kind.value for card in ADVANCED_CARDS)]
-        with ui.element("div").classes("simulation-filter-bar"):
+        with ui.element("div").classes("simulation-filter-bar simulation-filter-bar--three"):
             query_input = ui.input(
                 "カード名・役割を検索", placeholder="例：偵察、航空、補給",
                 on_change=lambda _: refresh_filters(),
             ).props("outlined clearable").classes("filter-control")
-            entry_kind_select = ui.select(
-                [*ADVANCED_ENTRY_KINDS, "すべて"],
-                value=ADVANCED_ENTRY_KIND_CARD,
-                label="名称区分",
-                on_change=lambda _: refresh_filters(),
-            ).props("outlined options-dense").classes("filter-control")
             domain_select = ui.select(
                 domain_values, value="すべて", label="領域",
                 on_change=lambda _: refresh_filters(),
@@ -4054,20 +4171,16 @@ def simulation_deck_page() -> None:
             query = str(query_input.value or "")
             domain = None if domain_select.value == "すべて" else str(domain_select.value)
             kind = None if kind_select.value == "すべて" else str(kind_select.value)
-            entry_kind = (
-                None if entry_kind_select.value == "すべて" else str(entry_kind_select.value)
-            )
             matches = search_advanced_cards(
                 query,
                 domain=domain,
                 play_kind=kind,
-                entry_kind=entry_kind,
             )
             visible = min(len(matches), int(filter_state["visible"]))
             deck = set(ensure_player_state(app.storage.user)["progression"]["advanced_deck"])
             section_heading(
-                f"{entry_kind_select.value} {len(matches)}件",
-                f"部隊規模は名称と分けて表示します。最初の{visible}件を表示中です。",
+                f"プレイ可能カード {len(matches)}件",
+                f"枠と部隊規模はカード一覧に含みません。最初の{visible}件を表示中です。",
             )
             if not matches:
                 ui.label("条件に合うカードがありません。検索語を短くしてみてください。").classes("section-subtitle")
@@ -4080,9 +4193,7 @@ def simulation_deck_page() -> None:
                     with element:
                         with ui.row().classes("w-full items-start justify-between gap-2 no-wrap"):
                             with ui.column().classes("gap-0 min-w-0"):
-                                ui.label(
-                                    f"{advanced_entry_kind(card)}・{card.domain.value}"
-                                ).classes("page-eyebrow")
+                                ui.label(f"{card.play_kind.value}・{card.domain.value}").classes("page-eyebrow")
                                 ui.label(advanced_identity_label(card)).classes("font-bold text-sm")
                             chip("選択中", "green") if card.id in deck else chip(card.rarity)
                         advanced_symbol(card)
@@ -4098,6 +4209,17 @@ def simulation_deck_page() -> None:
                 ).classes("mt-3")
 
         advanced_catalog()
+
+        with ui.expansion("配備時に選べる14種類の部隊規模", icon="account_tree").classes("details-expansion"):
+            ui.label(
+                "これらはカードではありません。部隊カードを作戦域へ出すときに1つ選び、能力補正として付けます。"
+            ).classes("section-subtitle mt-2")
+            with ui.element("div").classes("three-grid mt-3"):
+                for scale in ADVANCED_SCALE_CARDS:
+                    with ui.element("div").classes("simulation-status"):
+                        ui.label(scale.name).classes("font-bold blue-text")
+                        ui.label(advanced_scale_effect_text(scale.id)).classes("mono text-xs")
+                        ui.label(scale.description).classes("section-subtitle")
 
 
 @ui.page("/account")

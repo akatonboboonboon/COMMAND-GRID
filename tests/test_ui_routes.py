@@ -374,17 +374,41 @@ class UiRouteTests(unittest.TestCase):
         )
         self.assertEqual(card.name, "第1歩兵")
 
-    def test_advanced_identity_labels_pure_scales_differently(self) -> None:
-        ordinary = next(card for card in main.ADVANCED_CARDS if card.family != "echelon")
-        scale = next(card for card in main.ADVANCED_CARDS if card.family == "echelon")
-
+    def test_advanced_identity_separates_playable_cards_and_scale_modifiers(self) -> None:
+        ordinary = main.ADVANCED_CARDS[0]
+        division = main.get_advanced_scale("advanced_echelon_05")
         mission_division = main.get_advanced_card("advanced_task_organizations_05")
 
         self.assertEqual(main.advanced_identity_label(ordinary), f"カード名：{ordinary.name}")
-        self.assertEqual(main.advanced_identity_label(scale), f"部隊規模：{scale.name}")
+        self.assertFalse(any(card.family in {"frames", "echelon"} for card in main.ADVANCED_CARDS))
+        with self.assertRaises(KeyError):
+            main.get_advanced_card("advanced_echelon_05")
+        self.assertEqual(division.name, "師団")
         self.assertEqual(
             main.advanced_identity_label(mission_division),
             "カード名：任務部隊／部隊規模：師団",
+        )
+
+    def test_advanced_symbols_use_catalog_frames_as_display_metadata(self) -> None:
+        self.assertEqual(
+            main.advanced_frame_kind(main.get_advanced_card("advanced_infantry_01")),
+            "unit",
+        )
+        self.assertEqual(
+            main.advanced_frame_kind(main.get_advanced_card("advanced_ground_entities_01")),
+            "ground",
+        )
+        self.assertEqual(
+            main.advanced_frame_kind(main.get_advanced_card("advanced_air_space_entities_01")),
+            "air",
+        )
+        self.assertEqual(
+            main.advanced_frame_kind(main.get_advanced_card("advanced_air_space_entities_11")),
+            "space",
+        )
+        self.assertEqual(
+            main.advanced_frame_kind(main.get_advanced_card("advanced_sea_entities_08")),
+            "subsurface",
         )
 
     def test_card_detail_dialog_is_created_only_on_first_open(self) -> None:
