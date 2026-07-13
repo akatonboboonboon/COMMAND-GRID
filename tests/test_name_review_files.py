@@ -27,16 +27,23 @@ class NameReviewFileTests(unittest.TestCase):
         advanced_scales = {
             card.id: card for card in ADVANCED_CARDS if card.family == "echelon"
         }
+        advanced_task_scales = {
+            card.id: scale
+            for card in ADVANCED_CARDS
+            if card.family != "echelon"
+            for _, scale in (advanced_name_and_scale(card),)
+            if scale is not None
+        }
 
         self.assertEqual(len(name_rows), 205)
-        self.assertEqual(len(scale_rows), 14)
+        self.assertEqual(len(scale_rows), 38)
         self.assertEqual(
             {row["カードID"] for row in name_rows},
             set(normal_cards) | set(advanced_names),
         )
         self.assertEqual(
-            {row["規模ID"] for row in scale_rows},
-            set(advanced_scales),
+            {row["対象ID"] for row in scale_rows},
+            set(normal_cards) | set(advanced_task_scales) | set(advanced_scales),
         )
 
         for row in name_rows:
@@ -44,19 +51,41 @@ class NameReviewFileTests(unittest.TestCase):
             if card_id in normal_cards:
                 card = normal_cards[card_id]
                 self.assertEqual(row["現在の部隊・カード名"], card.name)
-                self.assertEqual(row["現在の部隊規模"], card.echelon)
             else:
                 card = advanced_names[card_id]
-                name, scale = advanced_name_and_scale(card)
+                name, _ = advanced_name_and_scale(card)
                 self.assertIsNotNone(name)
                 self.assertEqual(row["現在の部隊・カード名"], name)
-                self.assertEqual(row["現在の部隊規模"], scale or "")
 
         for row in scale_rows:
-            self.assertEqual(
-                row["現在の部隊規模"],
-                advanced_scales[row["規模ID"]].name,
-            )
+            target_id = row["対象ID"]
+            if target_id in normal_cards:
+                expected_scale = normal_cards[target_id].echelon
+            elif target_id in advanced_task_scales:
+                expected_scale = advanced_task_scales[target_id]
+            else:
+                expected_scale = advanced_scales[target_id].name
+            self.assertEqual(row["現在の部隊規模"], expected_scale)
+
+    def test_name_file_has_one_edit_blank_per_row(self) -> None:
+        with CARD_NAMES_PATH.open(encoding="utf-8", newline="") as file:
+            reader = csv.reader(file)
+            rows = list(reader)
+
+        self.assertEqual(
+            rows[0],
+            [
+                "カタログ",
+                "番号",
+                "カードID",
+                "分類",
+                "現在の部隊・カード名",
+                "変更後の部隊・カード名",
+            ],
+        )
+        self.assertTrue(all(len(row) == 6 for row in rows[1:]))
+        self.assertTrue(all(row[-1] == "" for row in rows[1:]))
+        self.assertTrue(all(row[-2] != "" for row in rows[1:]))
 
 
 if __name__ == "__main__":
