@@ -1,5 +1,6 @@
 import csv
 import unittest
+from collections import Counter
 from pathlib import Path
 
 from advanced_game_data import ADVANCED_CARDS, advanced_name_and_scale
@@ -21,9 +22,7 @@ class NameReviewFileTests(unittest.TestCase):
         name_rows = read_csv(CARD_NAMES_PATH)
         scale_rows = read_csv(UNIT_SCALES_PATH)
         normal_cards = {card.id: card for card in CARDS}
-        advanced_names = {
-            card.id: card for card in ADVANCED_CARDS if card.family != "echelon"
-        }
+        advanced_names = {card.id: card for card in ADVANCED_CARDS}
         advanced_scales = {
             card.id: card for card in ADVANCED_CARDS if card.family == "echelon"
         }
@@ -35,8 +34,12 @@ class NameReviewFileTests(unittest.TestCase):
             if scale is not None
         }
 
-        self.assertEqual(len(name_rows), 205)
+        self.assertEqual(len(name_rows), 219)
         self.assertEqual(len(scale_rows), 38)
+        self.assertEqual(
+            Counter(row["カタログ"] for row in name_rows),
+            {"通常・カジュアル18枚": 18, "本格シミュレーション201枚": 201},
+        )
         self.assertEqual(
             {row["カードID"] for row in name_rows},
             set(normal_cards) | set(advanced_names),
@@ -54,8 +57,7 @@ class NameReviewFileTests(unittest.TestCase):
             else:
                 card = advanced_names[card_id]
                 name, _ = advanced_name_and_scale(card)
-                self.assertIsNotNone(name)
-                self.assertEqual(row["現在の部隊・カード名"], name)
+                self.assertEqual(row["現在の部隊・カード名"], name or card.name)
 
         for row in scale_rows:
             target_id = row["対象ID"]
