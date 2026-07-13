@@ -1,5 +1,6 @@
 import unittest
 
+import tutorial_data
 from game_data import CARDS, CARD_INDEX
 from tutorial_data import (
     CARD_TUTORIALS,
@@ -153,6 +154,30 @@ class TutorialDataTests(unittest.TestCase):
                     ]
                 )
                 self.assertIn("総需要", copy)
+
+    def test_all_tutorial_source_copy_uses_scale_free_card_names(self) -> None:
+        old_combined_names = (
+            "第1歩兵中隊",
+            "空中機動歩兵班",
+            "第4機甲中隊",
+            "前方偵察班",
+            "電子偵察班",
+            "野戦砲兵中隊",
+            "第2工兵中隊",
+            "前線補給中隊",
+        )
+        all_copy = " ".join(
+            (
+                repr(tutorial_data.CARD_TUTORIALS),
+                repr(tutorial_data.OFFICIAL_DECKS),
+                repr(tutorial_data._GUIDES),  # pylint: disable=protected-access
+                repr(tutorial_data._EXERCISES),  # pylint: disable=protected-access
+                repr(tutorial_data._DECK_SPECS),  # pylint: disable=protected-access
+            )
+        )
+        for old_name in old_combined_names:
+            with self.subTest(name=old_name):
+                self.assertNotIn(old_name, all_copy)
 
 
 if __name__ == "__main__":

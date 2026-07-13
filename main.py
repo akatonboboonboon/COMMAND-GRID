@@ -22,9 +22,14 @@ from account_store import (
     get_default_account_store,
 )
 from advanced_game_data import (
+    ADVANCED_ENTRY_KIND_CARD,
+    ADVANCED_ENTRY_KIND_SCALE,
+    ADVANCED_ENTRY_KINDS,
     ADVANCED_CARDS,
     ADVANCED_STARTER_DECK,
     AdvancedCard,
+    advanced_entry_kind,
+    advanced_name_and_scale,
     get_advanced_card,
     search_advanced_cards,
 )
@@ -518,9 +523,31 @@ def secondary_button(label: str, path: str | None = None, icon: str | None = Non
 def unit_symbol(card: UnitCard, size: str = "md", formation_id: str | None = None) -> None:
     marker, formation_name = formation_label(card, formation_id)
     with ui.element("div").classes(f"unit-symbol unit-symbol--{size}").props(
-        f'data-echelon="{marker}" role="img" aria-label="{card.branch}・{formation_name}の部隊記号"'
+        f'data-echelon="{marker}" role="img" '
+        f'aria-label="部隊名：{card.name}・兵科：{card.branch}・部隊規模：{formation_name}の記号"'
     ):
         ui.label(card.symbol)
+
+
+def unit_identity_values(
+    card: UnitCard,
+    formation_id: str | None = None,
+) -> tuple[tuple[str, str], ...]:
+    """Return separately labeled identity fields for every normal card view."""
+
+    _, formation_name = formation_label(card, formation_id)
+    return (
+        ("部隊名", card.name),
+        ("兵科", card.branch),
+        ("部隊規模", formation_name),
+    )
+
+
+def unit_identity_meta(card: UnitCard, formation_id: str | None = None) -> None:
+    values = dict(unit_identity_values(card, formation_id))
+    with ui.element("div").classes("unit-identity-meta"):
+        ui.label(f"兵科：{values['兵科']}").classes("unit-identity-meta__item")
+        ui.label(f"部隊規模：{values['部隊規模']}").classes("unit-identity-meta__item")
 
 
 def account_icon(
@@ -542,6 +569,16 @@ def advanced_symbol(card: AdvancedCard, *, classes: str = "simulation-card__symb
     ui.label(symbol.token if symbol else "□").classes(classes).props(
         f'role="img" aria-label="{card.name}の記号"'
     )
+
+
+def advanced_identity_label(card: AdvancedCard) -> str:
+    name, scale = advanced_name_and_scale(card)
+    parts = []
+    if name is not None:
+        parts.append(f"カード名：{name}")
+    if scale is not None:
+        parts.append(f"部隊規模：{scale}")
+    return "／".join(parts)
 
 
 def primary_card_stats(
@@ -588,12 +625,14 @@ def card_detail_dialog(card: UnitCard) -> ui.dialog:
             unit_symbol(card, "lg")
             with ui.column().classes("gap-1 flex-1"):
                 with ui.row().classes("items-center gap-2"):
-                    chip(card.branch)
+                    chip(f"兵科：{card.branch}")
+                    chip(f"部隊規模：{card.echelon}", "green")
                     chip(card.rarity, "yellow" if card.rarity != "標準" else "")
                     if not card.owned:
                         chip("未入手", "red")
+                ui.label("部隊名").classes("page-eyebrow")
                 ui.label(card.name).classes("text-2xl font-bold")
-                ui.label(f"{card.echelon}・扱いやすさ {card.difficulty}").classes("muted text-sm")
+                ui.label(f"扱いやすさ：{card.difficulty}").classes("muted text-sm")
         ui.separator().classes("bg-blue-grey-8 my-2")
         with ui.column().classes("gap-4"):
             with ui.column().classes("gap-1"):
@@ -649,10 +688,11 @@ def unit_card(card: UnitCard, *, selected: bool = False,
     with ui.card().classes(classes):
         with ui.row().classes("w-full items-start justify-between no-wrap"):
             with ui.column().classes("gap-0 min-w-0"):
-                ui.label(card.branch).classes("unit-card__branch")
+                ui.label("部隊名").classes("unit-card__branch")
                 ui.label(card.name).classes("unit-card__name")
             if status_label:
                 chip(status_label, "green")
+        unit_identity_meta(card)
         with ui.element("div").classes("unit-card__symbol-area"):
             unit_symbol(card)
         ui.label(card.tagline).classes("unit-card__tagline")
@@ -690,9 +730,11 @@ def beginner_card(card: UnitCard, *, status_label: str | None = None) -> None:
             unit_symbol(card)
             with ui.column().classes("gap-1 min-w-0 flex-1"):
                 with ui.row().classes("items-center gap-2"):
-                    ui.label(card.branch).classes("page-eyebrow")
+                    ui.label("部隊名").classes("page-eyebrow")
                     if status_label:
                         chip(status_label, "green")
+                ui.label(card.name).classes("font-bold")
+                unit_identity_meta(card)
                 ui.label(info["verb"]).classes("text-xl font-bold")
                 ui.label(info["plain"]).classes("section-subtitle")
         ui.button("このカードだけ詳しく見る", icon="arrow_forward", on_click=open_detail).props(
@@ -791,7 +833,7 @@ def official_deck_preview(
                         ui.label(f"{slot:02}").classes("official-deck-slot__number")
                         unit_symbol(card, "sm")
                         ui.label(card.name).classes("official-deck-slot__name")
-                        ui.label(card.branch).classes("muted text-xs")
+                        unit_identity_meta(card)
                 else:
                     with ui.element("div").classes("official-deck-slot official-deck-slot--missing"):
                         ui.label(f"{slot:02}").classes("official-deck-slot__number")
@@ -846,7 +888,7 @@ def card_tutorial_tile(tutorial: CardTutorial, player: dict[str, object]) -> Non
 
 @contextmanager
 def page_shell(active: str, eyebrow: str, title: str, subtitle: str) -> Iterator[None]:
-    ui.add_head_html('<link rel="stylesheet" href="/static/styles.css?v=20260712-3">')
+    ui.add_head_html('<link rel="stylesheet" href="/static/styles.css?v=20260713-1">')
     ui.colors(
         primary="#60AFFF",
         secondary="#55C7D9",
@@ -1311,7 +1353,7 @@ def basic_tutorial_page() -> None:
                         unit_symbol(card, "sm")
                         with ui.column().classes("gap-0 min-w-0"):
                             ui.label(card.name).classes("font-bold text-sm")
-                            ui.label(card.branch).classes("muted text-xs")
+                            unit_identity_meta(card)
                     ui.label(
                         f"制圧 {card.control}　支援 {card.support}　偵察 {card.recon}　補給 {card.supply:+d}"
                     ).classes("tutorial-card-numbers")
@@ -1333,6 +1375,7 @@ def basic_tutorial_page() -> None:
                 with option:
                     unit_symbol(card, "sm")
                     ui.label(card.name).classes("font-bold text-sm")
+                    unit_identity_meta(card)
                     card_stats(card)
         ui.label("置く戦線を選ぶ").classes("font-bold mt-3")
         with ui.element("div").classes("tutorial-lane-grid"):
@@ -1377,7 +1420,7 @@ def basic_tutorial_page() -> None:
         with ui.element("div").classes("tutorial-lane-grid mt-3"):
             for lane_name, content, owner in (
                 ("左戦線", "配備なし", ""),
-                ("中央戦線", "第1歩兵中隊", "あなた"),
+                ("中央戦線", "部隊名：第1歩兵／部隊規模：中隊", "あなた"),
                 ("右戦線", "未確認部隊", "相手"),
             ):
                 with ui.element("div").classes("tutorial-lane tutorial-lane--revealed"):
@@ -1804,7 +1847,7 @@ def card_tutorial_page(card_id: str) -> None:
                         with ui.row().classes(
                             "w-full items-start justify-between gap-2 no-wrap"
                         ):
-                            ui.label(hand_card_data.branch).classes(
+                            ui.label("部隊名").classes(
                                 "unit-card__branch"
                             )
                             if hand_card_id == card_id:
@@ -1812,6 +1855,7 @@ def card_tutorial_page(card_id: str) -> None:
                         ui.label(hand_card_data.name).classes(
                             "font-bold text-sm min-h-10"
                         )
+                        unit_identity_meta(hand_card_data)
                         with ui.element("div").classes(
                             "unit-card__symbol-area"
                         ).style("min-height:72px"):
@@ -1936,6 +1980,7 @@ def card_tutorial_page(card_id: str) -> None:
                                     with ui.column().classes("gap-0"):
                                         ui.label("今回配備するカード").classes("muted text-xs")
                                         ui.label(card.name).classes("font-bold")
+                                        unit_identity_meta(card)
                                 card_stats(card)
                             with ui.element("div").classes("tutorial-field-grid tutorial-lane-grid"):
                                 for lane in stage.exercise_lanes:
@@ -2030,7 +2075,9 @@ def card_tutorial_page(card_id: str) -> None:
                     with ui.row().classes("items-start gap-4 no-wrap"):
                         unit_symbol(card, "lg")
                         with ui.column().classes("gap-1 min-w-0"):
-                            chip(card.branch)
+                            chip(f"兵科：{card.branch}")
+                            chip(f"部隊規模：{card.echelon}", "green")
+                            ui.label("部隊名").classes("page-eyebrow")
                             ui.label(card.name).classes("text-xl font-bold")
                             ui.label(card.tagline).classes("section-subtitle")
                     ui.separator().classes("bg-blue-grey-8 my-2")
@@ -2408,6 +2455,7 @@ def deck_page() -> None:
             player = ensure_player_state(app.storage.user)
             deck_ids = list(player["deck"])
             owned_cards = set(player["collection"]["owned_cards"])
+            selected_formation_id = str(player["selected_formation"])
             analysis = analyze_deck(deck_ids)
             with ui.element("div").classes("deck-layout"):
                 with ui.card().classes("panel"):
@@ -2421,13 +2469,14 @@ def deck_page() -> None:
                                 with ui.row().classes("w-full items-center no-wrap gap-3"):
                                     unit_symbol(card, "sm")
                                     with ui.column().classes("gap-0 min-w-0 flex-1"):
+                                        ui.label("部隊名").classes("muted text-xs")
                                         with ui.row().classes("items-center gap-2"):
                                             ui.label(card.name).classes("font-bold text-sm")
-                                            chip(card.branch)
                                             if card.id in deck_ids:
                                                 chip("編制中", "green")
                                             elif card.id not in owned_cards:
                                                 chip("未所持")
+                                        unit_identity_meta(card, selected_formation_id)
                                         ui.label(card.tagline).classes("muted text-xs")
                                         card_stats(card)
                                     add = ui.button(
@@ -2481,8 +2530,9 @@ def deck_page() -> None:
                                     with ui.row().classes("w-full items-center no-wrap gap-3"):
                                         unit_symbol(card, "sm")
                                         with ui.column().classes("gap-0 flex-1"):
+                                            ui.label("部隊名").classes("muted text-xs")
                                             ui.label(card.name).classes("font-bold text-sm")
-                                            ui.label(f"{card.branch}・{card.echelon}").classes("muted text-xs")
+                                            unit_identity_meta(card, selected_formation_id)
                                             card_stats(card)
                                         ui.button(
                                             icon="remove", on_click=lambda cid=card_id: remove_card(cid)
@@ -2493,6 +2543,7 @@ def deck_page() -> None:
                 ensure_player_state(app.storage.user), get_formation(formation_id).id
             )
             store_player_state(app.storage.user, state)
+            deck_view.refresh()
             formation_view.refresh()
             ui.notify(f"編制規模を{get_formation(formation_id).name}にしました。", type="positive")
 
@@ -3147,8 +3198,9 @@ def multiplayer_battle_page() -> None:
                                 if not submitted:
                                     hand_card.on("click", lambda cid=card_id: select_pvp_card(cid))
                                 with hand_card:
-                                    ui.label(card.branch).classes("unit-card__branch")
+                                    ui.label("部隊名").classes("unit-card__branch")
                                     ui.label(card.name).classes("font-bold text-sm min-h-10")
+                                    unit_identity_meta(card, formation.id)
                                     with ui.element("div").classes("unit-card__symbol-area").style("min-height:72px"):
                                         unit_symbol(card, "sm", formation.id)
                                     ui.label(card.tagline).classes("text-xs font-bold")
@@ -3538,8 +3590,9 @@ def battle_page() -> None:
                                     hand_card.on("click", lambda cid=card_id: select_card(cid))
                                 with hand_card:
                                     with ui.row().classes("w-full items-start justify-between no-wrap"):
-                                        ui.label(card.branch).classes("unit-card__branch")
+                                        ui.label("部隊名").classes("unit-card__branch")
                                     ui.label(card.name).classes("font-bold text-sm min-h-10")
+                                    unit_identity_meta(card, formation.id)
                                     with ui.element("div").classes("unit-card__symbol-area").style("min-height:72px"):
                                         unit_symbol(card, "sm", formation.id)
                                     ui.label(card.tagline).classes("text-xs font-bold")
@@ -3813,7 +3866,10 @@ def simulation_page() -> None:
                             ).classes("danger-text text-right")
                         ui.label("味方の配備").classes("muted text-xs")
                         ui.label(
-                            "・".join(get_advanced_card(item.card_id).name for item in own_units[-3:])
+                            "・".join(
+                                advanced_identity_label(get_advanced_card(item.card_id))
+                                for item in own_units[-3:]
+                            )
                             or "まだ配備なし"
                         ).classes("text-sm font-bold")
                         ui.label(
@@ -3831,7 +3887,8 @@ def simulation_page() -> None:
                         ui.label(f"手札（残り {len(human.hand)}枚）").classes("section-title")
                         ui.label("上段の制圧・支援・偵察・補給は全カード共通です。指揮・機動は下段に表示します。").classes("section-subtitle")
                     chip(
-                        get_advanced_card(str(selection["card"])).name if selection.get("card") else "カード未選択",
+                        advanced_identity_label(get_advanced_card(str(selection["card"])))
+                        if selection.get("card") else "カード未選択",
                         "green" if selection.get("card") else "",
                     )
                 with ui.element("div").classes("simulation-card-grid"):
@@ -3845,8 +3902,10 @@ def simulation_page() -> None:
                         with card_element:
                             with ui.row().classes("w-full items-start justify-between gap-2 no-wrap"):
                                 with ui.column().classes("gap-0 min-w-0"):
-                                    ui.label(card.domain.value).classes("page-eyebrow")
-                                    ui.label(card.name).classes("font-bold text-sm")
+                                    ui.label(
+                                        f"{advanced_entry_kind(card)}・{card.domain.value}"
+                                    ).classes("page-eyebrow")
+                                    ui.label(advanced_identity_label(card)).classes("font-bold text-sm")
                                 chip(card.rarity, "yellow" if card.rarity != "標準" else "")
                             advanced_symbol(card)
                             ui.label(card.plain_role).classes("muted text-xs")
@@ -3855,7 +3914,7 @@ def simulation_page() -> None:
                 with ui.element("div").classes("simulation-controls"):
                     if selection.get("card") and selection.get("theater"):
                         ui.label(
-                            f"予定：{get_advanced_card(str(selection['card'])).name}を"
+                            f"予定：{advanced_identity_label(get_advanced_card(str(selection['card'])))}を"
                             f"{THEATER_LABELS[str(selection['theater'])]}へ配備"
                         ).classes("font-bold")
                     else:
@@ -3938,9 +3997,9 @@ def simulation_deck_page() -> None:
         with ui.element("section").classes("simulation-hero"):
             with ui.column().classes("gap-1 flex-1"):
                 chip("全201カード使用可能", "green")
-                ui.label("全部を一度に読む必要はありません").classes("text-2xl font-bold")
+                ui.label("カード名と部隊規模を分けて選べます").classes("text-2xl font-bold")
                 ui.label(
-                    "検索と領域フィルターで少しずつ見られます。24枚のうち実戦で使うのは12枚です。"
+                    "部隊・装備など187件と、総軍・師団・中隊などの部隊規模14件を名称区分で切り替えます。"
                 ).classes("section-subtitle")
             with ui.row().classes("gap-2"):
                 primary_button("このデッキで新規作戦", icon="play_arrow", on_click=start_selected_simulation)
@@ -3961,8 +4020,10 @@ def simulation_deck_page() -> None:
                         on_click=lambda cid=card_id: toggle_advanced_card(cid)
                     ).props("flat no-caps").classes("simulation-card simulation-card--selected"):
                         advanced_symbol(card)
-                        ui.label(card.name).classes("font-bold text-xs")
-                        ui.label(f"{card.domain.value}・{card.play_kind.value}").classes("muted text-xs")
+                        ui.label(advanced_identity_label(card)).classes("font-bold text-xs")
+                        ui.label(
+                            f"{advanced_entry_kind(card)}・{card.domain.value}・{card.play_kind.value}"
+                        ).classes("muted text-xs")
 
         selected_deck()
 
@@ -3973,6 +4034,12 @@ def simulation_deck_page() -> None:
                 "カード名・役割を検索", placeholder="例：偵察、航空、補給",
                 on_change=lambda _: refresh_filters(),
             ).props("outlined clearable").classes("filter-control")
+            entry_kind_select = ui.select(
+                [*ADVANCED_ENTRY_KINDS, "すべて"],
+                value=ADVANCED_ENTRY_KIND_CARD,
+                label="名称区分",
+                on_change=lambda _: refresh_filters(),
+            ).props("outlined options-dense").classes("filter-control")
             domain_select = ui.select(
                 domain_values, value="すべて", label="領域",
                 on_change=lambda _: refresh_filters(),
@@ -3987,12 +4054,20 @@ def simulation_deck_page() -> None:
             query = str(query_input.value or "")
             domain = None if domain_select.value == "すべて" else str(domain_select.value)
             kind = None if kind_select.value == "すべて" else str(kind_select.value)
-            matches = search_advanced_cards(query, domain=domain, play_kind=kind)
+            entry_kind = (
+                None if entry_kind_select.value == "すべて" else str(entry_kind_select.value)
+            )
+            matches = search_advanced_cards(
+                query,
+                domain=domain,
+                play_kind=kind,
+                entry_kind=entry_kind,
+            )
             visible = min(len(matches), int(filter_state["visible"]))
             deck = set(ensure_player_state(app.storage.user)["progression"]["advanced_deck"])
             section_heading(
-                f"カード一覧 {len(matches)}件",
-                f"最初の{visible}件を表示中。選択中のカードには青い枠が付きます。",
+                f"{entry_kind_select.value} {len(matches)}件",
+                f"部隊規模は名称と分けて表示します。最初の{visible}件を表示中です。",
             )
             if not matches:
                 ui.label("条件に合うカードがありません。検索語を短くしてみてください。").classes("section-subtitle")
@@ -4005,8 +4080,10 @@ def simulation_deck_page() -> None:
                     with element:
                         with ui.row().classes("w-full items-start justify-between gap-2 no-wrap"):
                             with ui.column().classes("gap-0 min-w-0"):
-                                ui.label(card.domain.value).classes("page-eyebrow")
-                                ui.label(card.name).classes("font-bold text-sm")
+                                ui.label(
+                                    f"{advanced_entry_kind(card)}・{card.domain.value}"
+                                ).classes("page-eyebrow")
+                                ui.label(advanced_identity_label(card)).classes("font-bold text-sm")
                             chip("選択中", "green") if card.id in deck else chip(card.rarity)
                         advanced_symbol(card)
                         ui.label(f"{card.play_kind.value}・{card.plain_role}").classes("muted text-xs")

@@ -26,6 +26,35 @@ class GameDataTests(unittest.TestCase):
             with self.subTest(card=card.id):
                 self.assertTrue(card.game_text.strip())
 
+    def test_card_names_do_not_duplicate_formation_scale(self) -> None:
+        expected_scale_free_names = {
+            "infantry_1": "第1歩兵",
+            "infantry_3": "空中機動歩兵",
+            "armor_1": "第4機甲",
+            "recon_1": "前方偵察",
+            "recon_3": "電子偵察",
+            "artillery_1": "野戦砲兵",
+            "engineer_1": "第2工兵",
+            "logistics_1": "前線補給",
+        }
+        formal_scale_suffixes = (
+            "総軍", "軍集団", "軍団", "軍", "師団", "旅団", "連隊",
+            "大隊", "中隊", "小隊", "分隊", "班",
+        )
+
+        for card_id, expected_name in expected_scale_free_names.items():
+            with self.subTest(card=card_id):
+                self.assertEqual(get_card(card_id).name, expected_name)
+        for card in CARDS:
+            with self.subTest(card=card.id):
+                self.assertFalse(card.name.endswith(formal_scale_suffixes))
+
+    def test_every_card_echelon_is_a_supported_native_scale(self) -> None:
+        supported_native_scales = {"班", "分隊", "小隊", "中隊", "大隊"}
+        for card in CARDS:
+            with self.subTest(card=card.id):
+                self.assertIn(card.echelon, supported_native_scales)
+
     def test_beginner_copy_does_not_invent_rows_inside_a_lane(self) -> None:
         copy = " ".join(
             [

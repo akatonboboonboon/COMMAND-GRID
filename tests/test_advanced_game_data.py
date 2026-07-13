@@ -4,13 +4,19 @@ from collections import Counter
 from dataclasses import fields
 
 from advanced_game_data import (
+    ADVANCED_ENTRY_KIND_CARD,
+    ADVANCED_ENTRY_KIND_SCALE,
+    ADVANCED_ENTRY_KINDS,
     ADVANCED_CARDS,
     ADVANCED_CARD_INDEX,
     ADVANCED_STARTER_DECK,
     ADVANCED_SYMBOL_INDEX,
     NUMERIC_CAPABILITY_FIELDS,
     RARITIES,
+    TASK_ORGANIZATION_SCALES,
     AdvancedCard,
+    advanced_entry_kind,
+    advanced_name_and_scale,
     build_advanced_catalog,
     build_balanced_deck,
     get_advanced_card,
@@ -178,6 +184,36 @@ class AdvancedGameDataTests(unittest.TestCase):
         rarity = search_advanced_cards(rarity="希少")
         self.assertTrue(rarity)
         self.assertTrue(all(card.rarity == "希少" for card in rarity))
+
+    def test_unit_scales_are_a_separate_kind_without_removing_cards(self) -> None:
+        ordinary = search_advanced_cards(entry_kind=ADVANCED_ENTRY_KIND_CARD)
+        scales = search_advanced_cards(entry_kind=ADVANCED_ENTRY_KIND_SCALE)
+
+        self.assertEqual(ADVANCED_ENTRY_KINDS, ("部隊・装備など", "部隊規模"))
+        self.assertEqual(len(ordinary), 187)
+        self.assertEqual(len(scales), 14)
+        self.assertEqual(len(ordinary) + len(scales), len(ADVANCED_CARDS))
+        self.assertTrue(all(card.family != "echelon" for card in ordinary))
+        self.assertTrue(all(card.family == "echelon" for card in scales))
+        self.assertTrue(all(advanced_entry_kind(card) == "部隊規模" for card in scales))
+        self.assertEqual(search_advanced_cards(entry_kind="不明な区分"), ())
+
+    def test_task_organization_names_and_scales_are_separate(self) -> None:
+        mission_corps = get_advanced_card("advanced_task_organizations_04")
+        mission_division = get_advanced_card("advanced_task_organizations_05")
+        pure_scale = get_advanced_card("advanced_echelon_05")
+
+        self.assertEqual(advanced_name_and_scale(mission_corps), ("任務部隊", "軍団"))
+        self.assertEqual(advanced_name_and_scale(mission_division), ("任務部隊", "師団"))
+        self.assertEqual(advanced_name_and_scale(pure_scale), (None, pure_scale.name))
+        self.assertIn(mission_division, search_advanced_cards("任務部隊"))
+
+        for card in ADVANCED_CARDS:
+            name, scale = advanced_name_and_scale(card)
+            if card.family != "echelon" and scale is not None:
+                self.assertEqual(name, "任務部隊")
+                self.assertIn(scale, TASK_ORGANIZATION_SCALES)
+                self.assertFalse(name.endswith(TASK_ORGANIZATION_SCALES))
 
 
 if __name__ == "__main__":

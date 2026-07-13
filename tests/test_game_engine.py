@@ -341,6 +341,23 @@ class GameEngineTests(unittest.TestCase):
         self.assertEqual(order.card_id, "infantry_2")
         self.assertEqual(order.formation_id, "division")
 
+    def test_deployment_log_separates_card_name_from_effective_scale(self) -> None:
+        for formation_id, expected_scale in ((None, "中隊"), ("division", "師団")):
+            with self.subTest(formation=formation_id or "native"):
+                state = self.make_game()
+                submit_order(state, "p1", "infantry_1", "center", formation_id)
+                submit_order(state, "p2", "recon_2", "left")
+                resolve_round(state)
+
+                event = next(
+                    item
+                    for item in state.events
+                    if item.kind == "own_card_deployed" and item.player_id == "p1"
+                )
+                self.assertIn("部隊名：第1歩兵", event.message)
+                self.assertIn(f"部隊規模：{expected_scale}", event.message)
+                self.assertNotIn("第1歩兵中隊", event.message)
+
 
 if __name__ == "__main__":
     unittest.main()

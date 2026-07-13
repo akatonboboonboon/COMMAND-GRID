@@ -14,6 +14,20 @@ from symbol_catalog import Domain, PlayKind, SYMBOL_CATALOG, SymbolDefinition
 
 
 RARITIES: tuple[str, ...] = ("標準", "専門", "精鋭", "希少")
+ADVANCED_ENTRY_KIND_CARD = "部隊・装備など"
+ADVANCED_ENTRY_KIND_SCALE = "部隊規模"
+ADVANCED_ENTRY_KINDS: tuple[str, ...] = (
+    ADVANCED_ENTRY_KIND_CARD,
+    ADVANCED_ENTRY_KIND_SCALE,
+)
+TASK_ORGANIZATION_SCALES: tuple[str, ...] = (
+    "軍団",
+    "師団",
+    "旅団",
+    "大隊",
+    "中隊",
+    "小隊",
+)
 NUMERIC_CAPABILITY_FIELDS: tuple[str, ...] = (
     "control",
     "support",
@@ -235,6 +249,28 @@ def get_advanced_card_for_symbol(symbol_id: str) -> AdvancedCard:
     return ADVANCED_SYMBOL_INDEX[symbol_id]
 
 
+def advanced_entry_kind(card: AdvancedCard) -> str:
+    """Separate pure echelon symbols from ordinary card names without deleting cards."""
+
+    return (
+        ADVANCED_ENTRY_KIND_SCALE
+        if card.family == "echelon"
+        else ADVANCED_ENTRY_KIND_CARD
+    )
+
+
+def advanced_name_and_scale(card: AdvancedCard) -> tuple[str | None, str | None]:
+    """Return display name and scale separately while retaining the source card ID."""
+
+    if card.family == "echelon":
+        return None, card.name
+    if card.family == "task_organizations":
+        for scale in TASK_ORGANIZATION_SCALES:
+            if card.name == f"任務{scale}":
+                return "任務部隊", scale
+    return card.name, None
+
+
 def _enum_value(value: Domain | PlayKind | str | None) -> str | None:
     if value is None:
         return None
@@ -250,6 +286,7 @@ def search_advanced_cards(
     domain: Domain | str | None = None,
     play_kind: PlayKind | str | None = None,
     rarity: str | None = None,
+    entry_kind: str | None = None,
 ) -> tuple[AdvancedCard, ...]:
     """Search and filter cards while preserving canonical catalog order."""
 
@@ -258,11 +295,22 @@ def search_advanced_cards(
     kind_value = _enum_value(play_kind)
     family_value = None if family is None else str(family)
     rarity_value = None if rarity is None else str(rarity)
+    entry_kind_value = None if entry_kind is None else str(entry_kind)
+    if entry_kind_value is not None and entry_kind_value not in ADVANCED_ENTRY_KINDS:
+        return ()
 
     matches: list[AdvancedCard] = []
     for card in ADVANCED_CARDS:
         searchable = " ".join(
-            (card.id, card.symbol_id, card.name, card.family, card.plain_role)
+            (
+                card.id,
+                card.symbol_id,
+                card.name,
+                card.family,
+                card.plain_role,
+                advanced_entry_kind(card),
+                *(part for part in advanced_name_and_scale(card) if part),
+            )
         ).casefold()
         if needle and needle not in searchable:
             continue
@@ -273,6 +321,8 @@ def search_advanced_cards(
         if kind_value is not None and card.play_kind.value != kind_value:
             continue
         if rarity_value is not None and card.rarity != rarity_value:
+            continue
+        if entry_kind_value is not None and advanced_entry_kind(card) != entry_kind_value:
             continue
         matches.append(card)
     return tuple(matches)

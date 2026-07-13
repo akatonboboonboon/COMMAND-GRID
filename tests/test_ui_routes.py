@@ -361,6 +361,32 @@ class UiRouteTests(unittest.TestCase):
                     ],
                 )
 
+    def test_unit_identity_keeps_name_branch_and_scale_in_separate_fields(self) -> None:
+        card = main.get_card("infantry_1")
+
+        self.assertEqual(
+            main.unit_identity_values(card),
+            (("部隊名", card.name), ("兵科", "歩兵"), ("部隊規模", "中隊")),
+        )
+        self.assertEqual(
+            main.unit_identity_values(card, "division"),
+            (("部隊名", card.name), ("兵科", "歩兵"), ("部隊規模", "師団")),
+        )
+        self.assertEqual(card.name, "第1歩兵")
+
+    def test_advanced_identity_labels_pure_scales_differently(self) -> None:
+        ordinary = next(card for card in main.ADVANCED_CARDS if card.family != "echelon")
+        scale = next(card for card in main.ADVANCED_CARDS if card.family == "echelon")
+
+        mission_division = main.get_advanced_card("advanced_task_organizations_05")
+
+        self.assertEqual(main.advanced_identity_label(ordinary), f"カード名：{ordinary.name}")
+        self.assertEqual(main.advanced_identity_label(scale), f"部隊規模：{scale.name}")
+        self.assertEqual(
+            main.advanced_identity_label(mission_division),
+            "カード名：任務部隊／部隊規模：師団",
+        )
+
     def test_card_detail_dialog_is_created_only_on_first_open(self) -> None:
         card = main.CARDS[0]
         dialog = Mock()

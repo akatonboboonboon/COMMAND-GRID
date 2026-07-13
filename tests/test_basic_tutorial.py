@@ -95,6 +95,22 @@ class BasicTutorialTests(unittest.TestCase):
         self.assertNotIn("6ラウンド", full_copy)
         self.assertNotIn("最低6枚", full_copy)
 
+    def test_course_copy_uses_scale_free_card_names(self) -> None:
+        old_combined_names = (
+            "第1歩兵中隊",
+            "空中機動歩兵班",
+            "第4機甲中隊",
+            "前方偵察班",
+            "電子偵察班",
+            "野戦砲兵中隊",
+            "第2工兵中隊",
+            "前線補給中隊",
+        )
+        full_copy = repr(BASIC_TUTORIAL_LESSONS)
+        for old_name in old_combined_names:
+            with self.subTest(name=old_name):
+                self.assertNotIn(old_name, full_copy)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -833,6 +833,26 @@ a:focus-visible {
   margin-top: 10px;
 }
 
+.unit-identity-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 8px;
+  width: 100%;
+  margin-top: 5px;
+}
+
+.unit-identity-meta__item {
+  color: #9fb4c8;
+  font-size: 10px;
+  font-weight: 750;
+  line-height: 1.35;
+}
+
+.hand-card .unit-identity-meta,
+.tutorial-mini-card .unit-identity-meta {
+  grid-template-columns: 1fr;
+}
+
 .card-stat {
   padding: 7px 4px;
   text-align: center;
@@ -2275,7 +2295,7 @@ body.cg-patterns-off .hero-main::after {
 
 .simulation-filter-bar {
   display: grid;
-  grid-template-columns: repeat(3, minmax(170px, 1fr));
+  grid-template-columns: repeat(4, minmax(150px, 1fr));
   gap: 11px;
   width: 100%;
 }

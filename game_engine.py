@@ -1011,6 +1011,7 @@ def _deploy_orders(state: GameState) -> None:
             revealed_to=[player_id],
         )
         state.lanes[order.lane_id].deployments.append(deployment)
+        deployed_card = card_metadata(order.card_id, order.formation_id)
         _event(
             state,
             "deployed",
@@ -1022,8 +1023,8 @@ def _deploy_orders(state: GameState) -> None:
             state,
             "own_card_deployed",
             (
-                f"{formation_metadata(order.formation_id)['name']}編制の"
-                f"{lookup_card(order.card_id).name}を{LANE_LABELS[order.lane_id]}へ配備しました。"
+                f"部隊名：{deployed_card['name']}／部隊規模：{deployed_card['echelon']}を"
+                f"{LANE_LABELS[order.lane_id]}へ配備しました。"
             ),
             player_id=player_id,
             lane_id=order.lane_id,
