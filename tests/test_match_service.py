@@ -18,7 +18,6 @@ from player_state import (
     PLAYER_STATE_KEY,
     default_player_state,
     store_player_state,
-    update_formation,
     update_mode,
 )
 from symbol_catalog import SYMBOL_CATALOG
@@ -28,7 +27,6 @@ class MatchServiceTests(unittest.TestCase):
     def make_storage(self) -> dict:
         state = default_player_state()
         state = update_mode(state, "ranked")
-        state = update_formation(state, "division")
         storage: dict = {}
         store_player_state(storage, state)
         return storage
@@ -42,14 +40,14 @@ class MatchServiceTests(unittest.TestCase):
 
         self.assertIsNotNone(context)
         self.assertEqual(context["mode"], "ranked")
-        self.assertEqual(context["formation"], "division")
+        self.assertNotIn("formation", context)
         self.assertEqual(context["deck"], storage[PLAYER_STATE_KEY]["deck"])
         self.assertEqual(started.max_rounds, MAX_ROUNDS)
         self.assertEqual(loaded.to_dict(), started.to_dict())
         self.assertEqual(start_match(storage).game_id, started.game_id)
         json.dumps(storage[ACTIVE_MATCH_KEY], ensure_ascii=False)
 
-    def test_play_round_uses_snapshotted_formation_and_persists(self) -> None:
+    def test_play_round_persists_without_formation(self) -> None:
         storage = self.make_storage()
         state = start_match(storage)
         first_card = state.players["player"].hand[0]
@@ -63,7 +61,7 @@ class MatchServiceTests(unittest.TestCase):
             for deployment in advanced.lanes["center"].deployments
             if deployment.player_id == "player"
         )
-        self.assertEqual(own_deployment.formation_id, "division")
+        self.assertFalse(hasattr(own_deployment, "formation_id"))
         self.assertEqual(load_match(storage).to_dict(), advanced.to_dict())
 
     def test_training_and_casual_use_easy_ai_while_ranked_keeps_standard(self) -> None:
@@ -102,7 +100,7 @@ class MatchServiceTests(unittest.TestCase):
         self.assertEqual(player["stats"]["battles_played"], 1)
         self.assertEqual(len(player["battle_history"]), 1)
         self.assertEqual(player["battle_history"][0]["mode"], "ranked")
-        self.assertEqual(player["battle_history"][0]["formation"], "division")
+        self.assertNotIn("formation", player["battle_history"][0])
         self.assertIn(state.game_id, storage[RECORDED_MATCH_IDS_KEY])
         self.assertTrue(storage[ACTIVE_MATCH_KEY]["result_recorded"])
 
@@ -194,6 +192,17 @@ class MatchServiceTests(unittest.TestCase):
         self.assertIsNone(load_match(storage))
         self.assertNotIn(ACTIVE_MATCH_KEY, storage)
         self.assertIsNotNone(start_match(storage))
+
+    def test_legacy_match_formation_is_ignored_on_load(self) -> None:
+        storage = self.make_storage()
+        started = start_match(storage)
+        storage[ACTIVE_MATCH_KEY]["formation"] = "division"
+
+        loaded = load_match(storage)
+
+        self.assertEqual(loaded.game_id, started.game_id)
+        self.assertNotIn("formation", storage[ACTIVE_MATCH_KEY])
+        self.assertNotIn("formation", get_match_context(storage))
 
 
 if __name__ == "__main__":

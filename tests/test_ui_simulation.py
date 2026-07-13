@@ -93,7 +93,7 @@ class UiSimulationTests(unittest.IsolatedAsyncioTestCase):
                 await user.open("/")
                 await user.should_see("現在選択中 12 / 12枚")
                 await user.should_see("部隊名")
-                await user.should_see("部隊規模：中隊")
+                await user.should_not_see("部隊規模")
 
                 expected_card_faces = len(main.CARDS) + len(main.STARTER_DECK)
                 for label in ("制圧", "支援", "偵察", "補給"):

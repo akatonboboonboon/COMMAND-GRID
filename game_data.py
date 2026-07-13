@@ -27,34 +27,6 @@ class UnitCard:
     difficulty: str = "かんたん"
 
 
-@dataclass(frozen=True, slots=True)
-class FormationScale:
-    id: str
-    name: str
-    marker: str
-    catalog_symbol_id: str
-
-
-FORMATION_SCALES: tuple[FormationScale, ...] = (
-    FormationScale("native", "カード固有", "", ""),
-    FormationScale("battalion", "大隊", "III", "echelon_08"),
-    FormationScale("brigade", "旅団", "X", "echelon_06"),
-    FormationScale("division", "師団", "XX", "echelon_05"),
-)
-FORMATION_INDEX = {formation.id: formation for formation in FORMATION_SCALES}
-
-
-def get_formation(formation_id: str | None) -> FormationScale:
-    return FORMATION_INDEX.get(str(formation_id), FORMATION_INDEX["native"])
-
-
-def formation_label(card: UnitCard, formation_id: str | None) -> tuple[str, str]:
-    formation = get_formation(formation_id)
-    if formation.id == "native":
-        return card.echelon, card.echelon
-    return formation.marker, formation.name
-
-
 ROLE_INFO = {
     "歩兵": {
         "verb": "場所を取る",

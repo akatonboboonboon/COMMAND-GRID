@@ -51,7 +51,6 @@ from game_engine import (
     Phase,
     RuleViolation,
     forfeit_match,
-    formation_metadata,
     lookup_card,
     new_game,
     resolve_round,
@@ -63,7 +62,6 @@ from player_state import (
     record_result,
     store_player_state,
     update_deck,
-    update_formation,
 )
 
 
@@ -91,7 +89,6 @@ class PlayerSnapshot:
 
     token: str
     deck: tuple[str, ...]
-    formation: str
     name: str
     icon_symbol_id: str
 
@@ -153,7 +150,7 @@ def join_queue(
 ) -> dict[str, Any]:
     """Join ``casual`` or ``ranked`` matchmaking and pair immediately.
 
-    Deck, formation, and display name are snapshotted at entry.  Repeating the
+    Deck and display name are snapshotted at entry.  Repeating the
     call while already waiting in the same queue is idempotent; entering a
     different active session raises ``MultiplayerError('active_session', ...)``.
     """
@@ -415,10 +412,9 @@ def submit_player_order(
 ) -> dict[str, Any]:
     """Submit this player's secret order and resolve when both are ready.
 
-    Formation is taken from the immutable matchmaking snapshot, preventing a
-    client from changing it mid-match.  ``game_engine.RuleViolation`` is
-    allowed through with stable codes such as ``order_already_submitted`` and
-    ``card_not_in_hand``.  The operation is atomic within this process.
+    ``game_engine.RuleViolation`` is allowed through with stable codes such as
+    ``order_already_submitted`` and ``card_not_in_hand``.  The operation is
+    atomic within this process.
     """
 
     token = ensure_player_token(storage)
@@ -430,8 +426,7 @@ def submit_player_order(
         if opponent in match.left_tokens:
             raise MultiplayerError("opponent_left", "The opponent has left this match.")
         player_id = match.player_ids[token]
-        snapshot = match.snapshots[token]
-        submit_order(match.game, player_id, card_id, lane_id, snapshot.formation)
+        submit_order(match.game, player_id, card_id, lane_id)
         if match.game.phase is Phase.RESOLVING:
             resolve_round(match.game)
         match.connected[token] = True
@@ -442,8 +437,8 @@ def submit_player_order(
 def claim_result(storage: MutableMapping[str, Any]) -> dict[str, Any]:
     """Record this player's completed match result exactly once.
 
-    The authoritative snapshot supplies mode, deck, formation, opponent, and
-    points.  The update is persisted through ``store_player_state`` before the
+    The authoritative snapshot supplies mode, deck, opponent, and points.  The
+    update is persisted through ``store_player_state`` before the
     in-memory claim is marked.  Repeated calls return ``already_claimed`` and
     leave aggregate stats unchanged.
     """
@@ -487,7 +482,6 @@ def claim_result(storage: MutableMapping[str, Any]) -> dict[str, Any]:
             mission_points_against=result.mission_points[opponent_id],
             turns=result.rounds_played,
             deck=snapshot.deck,
-            formation=snapshot.formation,
             summary=result.summary,
             unlocked_cards=reward_cards,
             unlocked_symbols=reward_symbols,
@@ -535,6 +529,8 @@ def _make_snapshot(
     deck: Sequence[str] | None,
     formation: str | None,
 ) -> PlayerSnapshot:
+    # ``formation`` remains accepted for old clients, but has no game effect.
+    del formation
     token = ensure_player_token(storage)
     state = ensure_player_state(storage)
 
@@ -555,24 +551,12 @@ def _make_snapshot(
     except RuleViolation as error:
         raise MultiplayerError("invalid_deck", str(error)) from error
 
-    if formation is not None:
-        try:
-            state = update_formation(state, formation)
-        except ValueError as error:
-            raise MultiplayerError("invalid_formation", str(error)) from error
-    chosen_formation = str(state["selected_formation"])
-    try:
-        formation_metadata(chosen_formation)
-    except RuleViolation as error:
-        raise MultiplayerError("invalid_formation", str(error)) from error
-
     raw_name = name if name is not None else state["profile"]["display_name"]
     display_name = " ".join(str(raw_name).split())[:32] or "司令官"
     icon_symbol_id = str(state["profile"]["selected_symbol"])
     return PlayerSnapshot(
         token,
         chosen_deck,
-        chosen_formation,
         display_name,
         icon_symbol_id,
     )
@@ -709,7 +693,6 @@ def _match_view_locked(
         "match_id": match.match_id,
         "friend_code": match.friend_code,
         "player_id": player_id,
-        "formation": match.snapshots[token].formation,
         "submitted": player_id in match.game.orders,
         "result_claimed": token in match.claimed_tokens,
         "player": {

@@ -713,28 +713,10 @@ a:focus-visible {
   line-height: 1;
 }
 
-.unit-symbol::before {
-  position: absolute;
-  top: -16px;
-  left: 50%;
-  content: attr(data-echelon);
-  transform: translateX(-50%);
-  color: #176fd1;
-  font-size: 9px;
-  font-weight: 800;
-  letter-spacing: 0.02em;
-  white-space: nowrap;
-}
-
 .unit-symbol--sm {
   width: 54px;
   height: 38px;
   font-size: 19px;
-}
-
-.unit-symbol--sm::before {
-  top: -12px;
-  font-size: 7px;
 }
 
 .unit-symbol--lg {
@@ -2327,10 +2309,6 @@ body.cg-patterns-off .hero-main::after {
 
 .simulation-filter-bar--three {
   grid-template-columns: repeat(3, minmax(170px, 1fr));
-}
-
-.simulation-scale-select {
-  min-width: min(320px, 100%);
 }
 
 @media (max-width: 1180px) {

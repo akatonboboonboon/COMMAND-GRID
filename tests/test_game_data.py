@@ -1,5 +1,6 @@
 import unittest
 
+import game_data
 from game_data import CARDS, GLOSSARY, ROLE_INFO, STARTER_DECK, analyze_deck, get_card
 from symbol_catalog import (
     CARD_SYMBOL_IDS,
@@ -49,11 +50,19 @@ class GameDataTests(unittest.TestCase):
             with self.subTest(card=card.id):
                 self.assertFalse(card.name.endswith(formal_scale_suffixes))
 
-    def test_every_card_echelon_is_a_supported_native_scale(self) -> None:
-        supported_native_scales = {"班", "分隊", "小隊", "中隊", "大隊"}
+    def test_echelon_is_collection_metadata_without_a_gameplay_api(self) -> None:
+        reference_echelons = {"班", "分隊", "小隊", "中隊", "大隊"}
         for card in CARDS:
             with self.subTest(card=card.id):
-                self.assertIn(card.echelon, supported_native_scales)
+                self.assertIn(card.echelon, reference_echelons)
+        removed_names = (
+            "FormationScale",
+            "FORMATION_SCALES",
+            "FORMATION_INDEX",
+            "get_formation",
+            "formation_label",
+        )
+        self.assertTrue(all(not hasattr(game_data, name) for name in removed_names))
 
     def test_beginner_copy_does_not_invent_rows_inside_a_lane(self) -> None:
         copy = " ".join(

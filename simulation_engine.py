@@ -1,9 +1,9 @@
 """Advanced 180-card simulation rules for COMMAND GRID.
 
 This mode is intentionally separate from the approachable core game.  It uses
-playable unit, equipment, and facility records plus attached formation scales,
-twelve turns, and six explainable capability axes while retaining the familiar
-three-theater simultaneous-order flow.
+playable unit, equipment, and facility records, twelve turns, and six
+explainable capability axes while retaining the familiar three-theater
+simultaneous-order flow.
 """
 
 from __future__ import annotations
@@ -14,16 +14,10 @@ from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
 from advanced_game_data import (
-    ADVANCED_SCALES,
     ADVANCED_STARTER_DECK,
-    DEFAULT_ADVANCED_SCALE_ID,
     AdvancedCard,
-    can_attach_advanced_scale,
     get_advanced_card,
-    get_advanced_scale,
-    intrinsic_advanced_scale_id,
     is_playable_advanced_card,
-    scaled_advanced_stats,
 )
 from symbol_catalog import Domain
 
@@ -72,66 +66,12 @@ def _get_playable_card(card_id: str) -> AdvancedCard:
     return card
 
 
-def _normalize_scale_id(card: AdvancedCard, scale_id: str | None) -> str | None:
-    """Validate a scale selection and supply the standard scale for units."""
+def _deployment_stats(card: AdvancedCard) -> Mapping[str, int]:
+    """Return the card's printed stats without external size modifiers."""
 
-    intrinsic = intrinsic_advanced_scale_id(card)
-    if intrinsic is not None:
-        _require(
-            scale_id is None or scale_id == intrinsic,
-            "fixed_scale",
-            f"{card.name}の部隊規模は{get_advanced_scale(intrinsic).name}で固定です。",
-        )
-        return intrinsic
-    if not can_attach_advanced_scale(card):
-        _require(
-            scale_id is None,
-            "scale_not_allowed",
-            f"{card.name}には部隊規模を設定できません。",
-        )
-        return None
-    selected = DEFAULT_ADVANCED_SCALE_ID if scale_id is None else str(scale_id)
-    try:
-        get_advanced_scale(selected)
-    except KeyError as error:
-        raise SimulationRuleError(
-            "invalid_scale", f"存在しない部隊規模です: {selected}"
-        ) from error
-    return selected
-
-
-def _saved_scale_id(card_id: str, value: Any) -> str | None:
-    """Upgrade pre-scale save records without making deserialization fragile."""
-
-    scale_id = None if value is None else str(value)
-    try:
-        card = get_advanced_card(card_id)
-    except KeyError:
-        # State validation reports the bad card with the usual rule error.
-        return scale_id
-    if scale_id is None:
-        intrinsic = intrinsic_advanced_scale_id(card)
-        if intrinsic is not None:
-            return intrinsic
-        if can_attach_advanced_scale(card):
-            return DEFAULT_ADVANCED_SCALE_ID
-    return scale_id
-
-
-def _deployment_stats(card: AdvancedCard, scale_id: str | None) -> Mapping[str, int]:
-    if can_attach_advanced_scale(card) or intrinsic_advanced_scale_id(card) is not None:
-        normalized = _normalize_scale_id(card, scale_id)
-        return scaled_advanced_stats(card, normalized or DEFAULT_ADVANCED_SCALE_ID)
-    _normalize_scale_id(card, scale_id)
     return {name: int(getattr(card, name)) for name in (
         "control", "support", "recon", "supply", "command", "mobility"
     )}
-
-
-def _scale_name(scale_id: str | None) -> str | None:
-    if scale_id is None:
-        return None
-    return get_advanced_scale(scale_id).name
 
 
 @dataclass(slots=True)
@@ -140,7 +80,6 @@ class SimulationOrder:
     card_id: str
     theater_id: str
     round_no: int
-    scale_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -148,7 +87,6 @@ class SimulationOrder:
             "card_id": self.card_id,
             "theater_id": self.theater_id,
             "round_no": self.round_no,
-            "scale_id": self.scale_id,
         }
 
     @classmethod
@@ -158,7 +96,6 @@ class SimulationOrder:
             str(value["card_id"]),
             str(value["theater_id"]),
             int(value["round_no"]),
-            _saved_scale_id(str(value["card_id"]), value.get("scale_id")),
         )
 
 
@@ -170,7 +107,6 @@ class SimulationDeployment:
     theater_id: str
     round_deployed: int
     revealed_to: list[str] = field(default_factory=list)
-    scale_id: str | None = None
 
     def visible_to(self, player_id: str) -> bool:
         return player_id == self.player_id or player_id in self.revealed_to
@@ -183,7 +119,6 @@ class SimulationDeployment:
             "theater_id": self.theater_id,
             "round_deployed": self.round_deployed,
             "revealed_to": list(self.revealed_to),
-            "scale_id": self.scale_id,
         }
 
     @classmethod
@@ -195,7 +130,6 @@ class SimulationDeployment:
             str(value["theater_id"]),
             int(value["round_deployed"]),
             [str(item) for item in value.get("revealed_to", [])],
-            _saved_scale_id(str(value["card_id"]), value.get("scale_id")),
         )
 
 
@@ -425,18 +359,14 @@ def submit_simulation_order(
     player_id: str,
     card_id: str,
     theater_id: str,
-    scale_id: str | None = None,
 ) -> SimulationOrder:
     _require(state.phase is SimulationPhase.PLANNING, "wrong_phase", "現在は命令を選べません。")
     _require(player_id in state.players, "unknown_player", "存在しないプレイヤーです。")
     _require(theater_id in state.theaters, "unknown_theater", "存在しない作戦域です。")
     _require(player_id not in state.orders, "order_exists", "命令は確定済みです。")
     _require(card_id in state.players[player_id].hand, "card_not_in_hand", "そのカードは手札にありません。")
-    card = _get_playable_card(card_id)
-    selected_scale = _normalize_scale_id(card, scale_id)
-    order = SimulationOrder(
-        player_id, card_id, theater_id, state.round_no, selected_scale
-    )
+    _get_playable_card(card_id)
+    order = SimulationOrder(player_id, card_id, theater_id, state.round_no)
     state.orders[player_id] = order
     if set(state.orders) == set(state.player_order):
         state.phase = SimulationPhase.RESOLVING
@@ -459,7 +389,7 @@ def calculate_simulation_power(
     cards_and_stats: list[tuple[AdvancedCard, Mapping[str, int]]] = []
     for item in deployments:
         card = _get_playable_card(item.card_id)
-        cards_and_stats.append((card, _deployment_stats(card, item.scale_id)))
+        cards_and_stats.append((card, _deployment_stats(card)))
     control = sum(stats["control"] for _, stats in cards_and_stats)
     support = sum(stats["support"] for _, stats in cards_and_stats)
     active_support = support if control > 0 else 0
@@ -517,56 +447,35 @@ def choose_simulation_ai_order(
             for item in theater.deployments
         )
         theater_context[theater_id] = own, enemy, own_count, hidden
-    best: tuple[float, int, int, int, str, str, str | None] | None = None
+    best: tuple[float, int, int, str, str] | None = None
     for card_index, card_id in enumerate(state.players[player_id].hand):
         card = _get_playable_card(card_id)
-        intrinsic = intrinsic_advanced_scale_id(card)
-        if intrinsic is not None:
-            scale_options: tuple[str | None, ...] = (intrinsic,)
-        elif can_attach_advanced_scale(card):
-            scale_options = tuple(scale.id for scale in ADVANCED_SCALES)
-        else:
-            scale_options = (None,)
-        for scale_index, scale_id in enumerate(scale_options):
-            stats = _deployment_stats(card, scale_id)
-            for theater_index, theater_id in enumerate(THEATER_IDS):
-                own, enemy, own_count, hidden = theater_context[theater_id]
-                gap = enemy.total - own.total
-                base = stats["control"] + (
-                    stats["support"] if own.control or stats["control"] else 0
-                )
-                information = min(stats["recon"], hidden) * 1.8
-                supply = 0.0
-                if (
-                    stats["supply"] > 0
-                    and own.supply_demand > own.supply_generated
-                ):
-                    supply = 5.0
-                command = stats["command"] * 0.45
-                mobility = stats["mobility"] * 0.35
-                contest = max(-2, min(8, gap)) * 1.25
-                # Encourage two-theater plans and stop wasteful over-stacking.
-                spread = 5.0 if own_count == 0 else 2.0 if own_count == 1 else 0.0
-                overstack = (
-                    max(0, own.total - enemy.total - 5) * 1.1 + own_count * 0.7
-                )
-                score = (
-                    base + information + supply + command + mobility + contest
-                    + spread - overstack
-                )
-                candidate = (
-                    score,
-                    -card_index,
-                    -theater_index,
-                    -scale_index,
-                    card_id,
-                    theater_id,
-                    scale_id,
-                )
-                if best is None or candidate > best:
-                    best = candidate
+        stats = _deployment_stats(card)
+        for theater_index, theater_id in enumerate(THEATER_IDS):
+            own, enemy, own_count, hidden = theater_context[theater_id]
+            gap = enemy.total - own.total
+            base = stats["control"] + (
+                stats["support"] if own.control or stats["control"] else 0
+            )
+            information = min(stats["recon"], hidden) * 1.8
+            supply = 0.0
+            if stats["supply"] > 0 and own.supply_demand > own.supply_generated:
+                supply = 5.0
+            command = stats["command"] * 0.45
+            mobility = stats["mobility"] * 0.35
+            contest = max(-2, min(8, gap)) * 1.25
+            # Encourage two-theater plans and stop wasteful over-stacking.
+            spread = 5.0 if own_count == 0 else 2.0 if own_count == 1 else 0.0
+            overstack = max(0, own.total - enemy.total - 5) * 1.1 + own_count * 0.7
+            score = (
+                base + information + supply + command + mobility + contest
+                + spread - overstack
+            )
+            candidate = (score, -card_index, -theater_index, card_id, theater_id)
+            if best is None or candidate > best:
+                best = candidate
     _require(best is not None, "no_order", "AIが出せるカードがありません。")
-    return SimulationOrder(player_id, best[4], best[5], state.round_no, best[6])
+    return SimulationOrder(player_id, best[3], best[4], state.round_no)
 
 
 def _reveal_by_recon(state: SimulationState) -> None:
@@ -590,7 +499,6 @@ def resolve_simulation_round(state: SimulationState) -> None:
         player = state.players[player_id]
         _require(order.card_id in player.hand, "card_not_in_hand", "命令カードがありません。")
         card = _get_playable_card(order.card_id)
-        selected_scale = _normalize_scale_id(card, order.scale_id)
         player.hand.remove(order.card_id)
         state.theaters[order.theater_id].deployments.append(
             SimulationDeployment(
@@ -600,13 +508,10 @@ def resolve_simulation_round(state: SimulationState) -> None:
                 theater_id=order.theater_id,
                 round_deployed=state.round_no,
                 revealed_to=[player_id],
-                scale_id=selected_scale,
             )
         )
-        scale_name = _scale_name(selected_scale)
-        identity = card.name if scale_name is None else f"{card.name}（{scale_name}）"
         state.events.append(
-            f"{state.round_no}T: {player.name}が{identity}を"
+            f"{state.round_no}T: {player.name}が{card.name}を"
             f"{THEATER_LABELS[order.theater_id]}へ配備。"
         )
     _reveal_by_recon(state)
@@ -640,14 +545,11 @@ def play_simulation_round(
     player_id: str,
     card_id: str,
     theater_id: str,
-    scale_id: str | None = None,
 ) -> None:
-    submit_simulation_order(state, player_id, card_id, theater_id, scale_id)
+    submit_simulation_order(state, player_id, card_id, theater_id)
     opponent_id = next(item for item in state.player_order if item != player_id)
     ai = choose_simulation_ai_order(state, opponent_id)
-    submit_simulation_order(
-        state, ai.player_id, ai.card_id, ai.theater_id, ai.scale_id
-    )
+    submit_simulation_order(state, ai.player_id, ai.card_id, ai.theater_id)
     resolve_simulation_round(state)
 
 
@@ -707,8 +609,7 @@ def validate_simulation_state(state: SimulationState) -> None:
             "invalid_state",
             "命令カードが手札にありません。",
         )
-        card = _get_playable_card(order.card_id)
-        order.scale_id = _normalize_scale_id(card, order.scale_id)
+        _get_playable_card(order.card_id)
     for theater_id, theater in state.theaters.items():
         _require(theater.theater_id == theater_id, "invalid_state", "作戦域IDが不正です。")
         for deployment in theater.deployments:
@@ -732,8 +633,7 @@ def validate_simulation_state(state: SimulationState) -> None:
                 "invalid_state",
                 "偵察公開先が不正です。",
             )
-            card = _get_playable_card(deployment.card_id)
-            deployment.scale_id = _normalize_scale_id(card, deployment.scale_id)
+            _get_playable_card(deployment.card_id)
     if state.phase is SimulationPhase.COMPLETE:
         _require(state.result is not None, "invalid_state", "完了結果がありません。")
 

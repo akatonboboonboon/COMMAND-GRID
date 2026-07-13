@@ -32,7 +32,6 @@ from player_state import (
     update_advanced_deck,
     update_basic_tutorial_stage,
     update_card_tutorial_stage,
-    update_formation,
     update_mode,
     update_preference,
     update_profile,
@@ -546,7 +545,9 @@ class PlayerStateTests(unittest.TestCase):
         self.assertEqual(state["preferences"]["profile_visibility"], "friends")
         self.assertEqual(set(state["preferences"]), set(PREFERENCE_DEFAULTS))
         self.assertEqual(state["deck"], ["infantry_1"])
-        self.assertEqual(state["selected_formation"], "division")
+        self.assertNotIn("selected_formation", state)
+        self.assertNotIn("unlocked_formations", state["collection"])
+        self.assertNotIn("formation", state["battle_history"][0])
         self.assertEqual(state["selected_mode"], "ranked")
         self.assertEqual(len(state["battle_history"]), 1)
         self.assertEqual(state["battle_history"][0]["mission_points_for"], 4)
@@ -581,15 +582,12 @@ class PlayerStateTests(unittest.TestCase):
         original = default_player_state()
         changed = update_preference(original, "high_contrast", True)
         changed = update_mode(changed, "フレンド対戦")
-        changed = update_formation(changed, "師団")
         changed = update_deck(changed, ["infantry_1", "recon_1"])
 
         self.assertFalse(original["preferences"]["high_contrast"])
         self.assertEqual(original["selected_mode"], "training")
-        self.assertEqual(original["selected_formation"], "native")
         self.assertTrue(changed["preferences"]["high_contrast"])
         self.assertEqual(changed["selected_mode"], "friend")
-        self.assertEqual(changed["selected_formation"], "division")
         self.assertEqual(changed["deck"], ["infantry_1", "recon_1"])
 
         with self.assertRaises(ValueError):
@@ -600,8 +598,6 @@ class PlayerStateTests(unittest.TestCase):
             update_preference(original, "font_size", "huge")
         with self.assertRaises(ValueError):
             update_mode(original, "battle_royale")
-        with self.assertRaises(ValueError):
-            update_formation(original, "army_group")
         with self.assertRaises(ValueError):
             update_deck(original, ["not_a_card"])
         with self.assertRaises(ValueError):
@@ -655,12 +651,13 @@ class PlayerStateTests(unittest.TestCase):
             original,
             cards=["infantry_3"],
             symbols=["infantry_09"],
-            formations=["division"],
+            formations=["division", "removed_legacy_value"],
         )
 
         self.assertNotIn("infantry_3", original["collection"]["owned_cards"])
         self.assertIn("infantry_3", unlocked["collection"]["owned_cards"])
         self.assertIn("infantry_09", unlocked["collection"]["unlocked_symbols"])
+        self.assertNotIn("unlocked_formations", unlocked["collection"])
 
         with self.assertRaises(ValueError):
             unlock_collection(original, cards=["missing"])
@@ -682,6 +679,8 @@ class PlayerStateTests(unittest.TestCase):
             summary="中央と右翼を確保",
             unlocked_cards=["infantry_3"],
             unlocked_symbols=["infantry_09"],
+            formation="division",
+            unlocked_formations=["brigade"],
         )
 
         self.assertEqual(state["stats"]["battles_played"], 0)
@@ -695,6 +694,8 @@ class PlayerStateTests(unittest.TestCase):
             won["battle_history"][0]["played_at"], "2026-07-10T12:30:00+00:00"
         )
         self.assertIn("infantry_3", won["collection"]["owned_cards"])
+        self.assertNotIn("formation", won["battle_history"][0])
+        self.assertNotIn("unlocked_formations", won["collection"])
 
         lost = record_result(won, "loss", mission_points_for=1)
         self.assertEqual(lost["stats"]["battles_played"], 2)

@@ -117,6 +117,14 @@ class MultiplayerServiceTests(unittest.TestCase):
             join_friend_room(charlie, room["room_code"])
         self.assertEqual(context.exception.code, "room_not_found")
 
+    def test_legacy_formation_arguments_are_ignored(self) -> None:
+        waiting = join_queue(self.alice, "casual", formation="division")
+        self.assertNotIn("formation", waiting)
+        joined = join_queue(self.bob, "casual", formation="obsolete-value")
+        self.assertEqual(joined["status"], "playing")
+        self.assertNotIn("formation", joined)
+        self.assertNotIn("formation", poll(self.alice))
+
     def test_default_match_name_comes_from_player_profile(self) -> None:
         state = ensure_player_state(self.alice)
         state = update_profile(state, display_name="Profile Alice")

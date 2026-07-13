@@ -3,14 +3,8 @@ import unittest
 
 from advanced_game_data import (
     ADVANCED_CARDS,
-    ADVANCED_SCALES,
     ADVANCED_STARTER_DECK,
-    DEFAULT_ADVANCED_SCALE_ID,
-    can_attach_advanced_scale,
     get_advanced_card,
-    get_advanced_scale,
-    intrinsic_advanced_scale_id,
-    scaled_advanced_stats,
 )
 from simulation_engine import (
     SIMULATION_ROUNDS,
@@ -30,18 +24,6 @@ from simulation_engine import (
 
 
 class SimulationEngineTests(unittest.TestCase):
-    @staticmethod
-    def attachable_card():
-        return next(card for card in ADVANCED_CARDS if can_attach_advanced_scale(card))
-
-    @staticmethod
-    def unscaled_card():
-        return next(
-            card for card in ADVANCED_CARDS
-            if not can_attach_advanced_scale(card)
-            and intrinsic_advanced_scale_id(card) is None
-        )
-
     def test_new_simulation_uses_24_card_catalog_deck_and_round_trips(self) -> None:
         state = new_simulation()
         self.assertEqual(state.max_rounds, 12)
@@ -56,13 +38,14 @@ class SimulationEngineTests(unittest.TestCase):
         with self.assertRaises(SimulationRuleError):
             new_simulation([*ADVANCED_STARTER_DECK[:11], "missing"])
 
-    def test_old_orders_and_deployments_default_attachable_units_to_company(self) -> None:
-        card = self.attachable_card()
+    def test_legacy_scale_fields_are_ignored_when_loading(self) -> None:
+        card = ADVANCED_CARDS[0]
         old_order = SimulationOrder.from_dict({
             "player_id": "player",
             "card_id": card.id,
             "theater_id": "north",
             "round_no": 1,
+            "scale_id": "advanced_echelon_01",
         })
         old_deployment = SimulationDeployment.from_dict({
             "deployment_id": "legacy:1",
@@ -71,100 +54,45 @@ class SimulationEngineTests(unittest.TestCase):
             "theater_id": "north",
             "round_deployed": 1,
             "revealed_to": ["player"],
+            "scale_id": "advanced_echelon_01",
         })
-        self.assertEqual(old_order.scale_id, DEFAULT_ADVANCED_SCALE_ID)
-        self.assertEqual(old_deployment.scale_id, DEFAULT_ADVANCED_SCALE_ID)
-        self.assertEqual(old_order.to_dict()["scale_id"], DEFAULT_ADVANCED_SCALE_ID)
+        self.assertNotIn("scale_id", old_order.to_dict())
+        self.assertNotIn("scale_id", old_deployment.to_dict())
+        self.assertFalse(hasattr(old_order, "scale_id"))
+        self.assertFalse(hasattr(old_deployment, "scale_id"))
 
-    def test_scale_modifies_the_stats_used_by_power_calculation(self) -> None:
-        card = next(
-            item for item in ADVANCED_CARDS
-            if can_attach_advanced_scale(item) and item.control <= 3
-        )
-        large_scale = ADVANCED_SCALES[0]
+    def test_power_calculation_uses_printed_card_stats(self) -> None:
+        card = ADVANCED_CARDS[0]
         state = new_simulation([card.id], max_rounds=1)
         state.theaters["central"].deployments.append(
             SimulationDeployment(
-                "scaled:1",
+                "plain:1",
                 "player",
                 card.id,
                 "central",
                 1,
                 ["player"],
-                large_scale.id,
             )
         )
-        expected = scaled_advanced_stats(card, large_scale.id)
         power = calculate_simulation_power(state, "central", "player")
-        self.assertEqual(power.control, expected["control"])
-        self.assertEqual(power.support, expected["support"])
-        self.assertEqual(power.recon, expected["recon"])
+        self.assertEqual(power.control, card.control)
+        self.assertEqual(power.support, card.support)
+        self.assertEqual(power.recon, card.recon)
 
-    def test_scale_selection_is_validated_and_non_units_reject_it(self) -> None:
-        card = self.attachable_card()
-        state = new_simulation([card.id], max_rounds=1)
-        with self.assertRaises(SimulationRuleError) as invalid:
-            submit_simulation_order(
-                state, "player", card.id, "north", "missing-scale"
-            )
-        self.assertEqual(invalid.exception.code, "invalid_scale")
-
-        facility = self.unscaled_card()
-        state = new_simulation([facility.id], max_rounds=1)
-        with self.assertRaises(SimulationRuleError) as forbidden:
-            submit_simulation_order(
-                state,
-                "player",
-                facility.id,
-                "north",
-                DEFAULT_ADVANCED_SCALE_ID,
-            )
-        self.assertEqual(forbidden.exception.code, "scale_not_allowed")
-        order = submit_simulation_order(state, "player", facility.id, "north")
-        self.assertIsNone(order.scale_id)
-
-    def test_intrinsic_task_organization_scale_is_fixed(self) -> None:
-        card = next(
-            item for item in ADVANCED_CARDS
-            if intrinsic_advanced_scale_id(item) is not None
-        )
-        intrinsic = intrinsic_advanced_scale_id(card)
-        state = new_simulation([card.id], max_rounds=1)
-        order = submit_simulation_order(state, "player", card.id, "central")
-        self.assertEqual(order.scale_id, intrinsic)
-        other_scale = next(scale.id for scale in ADVANCED_SCALES if scale.id != intrinsic)
-        state = new_simulation([card.id], max_rounds=1)
-        with self.assertRaises(SimulationRuleError) as fixed:
-            submit_simulation_order(
-                state, "player", card.id, "central", other_scale
-            )
-        self.assertEqual(fixed.exception.code, "fixed_scale")
-
-    def test_deployment_event_names_the_selected_scale(self) -> None:
-        card = self.attachable_card()
+    def test_deployment_event_names_only_the_card(self) -> None:
+        card = ADVANCED_CARDS[0]
         state = new_simulation([card.id], max_rounds=1)
         submit_simulation_order(state, "player", card.id, "north")
         submit_simulation_order(state, "opponent", card.id, "south")
         resolve_simulation_round(state)
-        scale_name = get_advanced_scale(DEFAULT_ADVANCED_SCALE_ID).name
-        self.assertTrue(any(card.name in event and scale_name in event for event in state.events))
+        self.assertTrue(any(card.name in event for event in state.events))
+        self.assertTrue(all("部隊規模" not in event for event in state.events))
 
-    def test_state_validation_rejects_nonplayable_cards_and_bad_scales(self) -> None:
+    def test_state_validation_rejects_nonplayable_cards(self) -> None:
         state = new_simulation()
         state.players["player"].hand[0] = "advanced_frames_01"
         with self.assertRaises(SimulationRuleError):
             validate_simulation_state(state)
-
-        card = self.attachable_card()
-        state = new_simulation([card.id], max_rounds=1)
-        state.theaters["north"].deployments.append(
-            SimulationDeployment(
-                "bad-scale", "player", card.id, "north", 1, ["player"], "missing"
-            )
-        )
-        with self.assertRaises(SimulationRuleError) as invalid:
-            validate_simulation_state(state)
-        self.assertEqual(invalid.exception.code, "invalid_scale")
 
     def test_power_explains_support_supply_command_mobility_and_domains(self) -> None:
         state = new_simulation()

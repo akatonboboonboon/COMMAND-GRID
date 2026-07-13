@@ -361,33 +361,27 @@ class UiRouteTests(unittest.TestCase):
                     ],
                 )
 
-    def test_unit_identity_keeps_name_branch_and_scale_in_separate_fields(self) -> None:
+    def test_unit_identity_omits_formation_scale_from_game_cards(self) -> None:
         card = main.get_card("infantry_1")
 
         self.assertEqual(
             main.unit_identity_values(card),
-            (("部隊名", card.name), ("兵科", "歩兵"), ("部隊規模", "中隊")),
-        )
-        self.assertEqual(
-            main.unit_identity_values(card, "division"),
-            (("部隊名", card.name), ("兵科", "歩兵"), ("部隊規模", "師団")),
+            (("部隊名", card.name), ("兵科", "歩兵")),
         )
         self.assertEqual(card.name, "第1歩兵")
 
-    def test_advanced_identity_separates_playable_cards_and_scale_modifiers(self) -> None:
+    def test_advanced_identity_omits_scales_but_collection_keeps_the_symbol(self) -> None:
         ordinary = main.ADVANCED_CARDS[0]
-        division = main.get_advanced_scale("advanced_echelon_05")
         mission_division = main.get_advanced_card("advanced_task_organizations_05")
 
         self.assertEqual(main.advanced_identity_label(ordinary), f"カード名：{ordinary.name}")
         self.assertFalse(any(card.family in {"frames", "echelon"} for card in main.ADVANCED_CARDS))
         with self.assertRaises(KeyError):
             main.get_advanced_card("advanced_echelon_05")
-        self.assertEqual(division.name, "師団")
-        self.assertEqual(
-            main.advanced_identity_label(mission_division),
-            "カード名：任務部隊／部隊規模：師団",
-        )
+        self.assertEqual(main.SYMBOL_INDEX["echelon_05"].name, "師団")
+        mission_label = main.advanced_identity_label(mission_division)
+        self.assertEqual(mission_label, f"カード名：{mission_division.name}")
+        self.assertNotIn("部隊規模", mission_label)
 
     def test_advanced_symbols_use_catalog_frames_as_display_metadata(self) -> None:
         self.assertEqual(

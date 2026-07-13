@@ -330,33 +330,49 @@ class GameEngineTests(unittest.TestCase):
 
         self.assertEqual((order.card_id, order.lane_id), ("recon_1", "center"))
 
-    def test_division_formation_metadata_and_default_hand_are_available(self) -> None:
+    def test_legacy_formation_argument_is_ignored(self) -> None:
         state = self.make_game()
         metadata = card_metadata("infantry_2", "division")
-        self.assertEqual(metadata["echelon"], "師団")
-        self.assertEqual(metadata["formation"]["name"], "師団")
-        self.assertEqual(metadata["formation"]["marker"], "XX")
-        self.assertTrue(metadata["large_formation"])
+        self.assertEqual(metadata, card_metadata("infantry_2"))
+        self.assertNotIn("echelon", metadata)
+        self.assertNotIn("formation", metadata)
         order = submit_order(state, "p1", "infantry_2", "center", "division")
         self.assertEqual(order.card_id, "infantry_2")
-        self.assertEqual(order.formation_id, "division")
+        self.assertFalse(hasattr(order, "formation_id"))
+        self.assertNotIn("formation_id", order.to_dict())
 
-    def test_deployment_log_separates_card_name_from_effective_scale(self) -> None:
-        for formation_id, expected_scale in ((None, "中隊"), ("division", "師団")):
-            with self.subTest(formation=formation_id or "native"):
-                state = self.make_game()
-                submit_order(state, "p1", "infantry_1", "center", formation_id)
-                submit_order(state, "p2", "recon_2", "left")
-                resolve_round(state)
+    def test_legacy_saved_formation_is_ignored_and_log_omits_scale(self) -> None:
+        state = self.make_game()
+        submit_order(state, "p1", "infantry_1", "center")
+        submit_order(state, "p2", "recon_2", "left")
+        payload = state.to_dict()
+        payload["orders"]["p1"]["formation_id"] = "division"
+        state = GameState.from_dict(payload)
+        self.assertNotIn("formation_id", state.orders["p1"].to_dict())
 
-                event = next(
-                    item
-                    for item in state.events
-                    if item.kind == "own_card_deployed" and item.player_id == "p1"
-                )
-                self.assertIn("部隊名：第1歩兵", event.message)
-                self.assertIn(f"部隊規模：{expected_scale}", event.message)
-                self.assertNotIn("第1歩兵中隊", event.message)
+        resolve_round(state)
+        event = next(
+            item
+            for item in state.events
+            if item.kind == "own_card_deployed" and item.player_id == "p1"
+        )
+        self.assertIn("第1歩兵", event.message)
+        self.assertNotIn("部隊規模", event.message)
+
+        payload = state.to_dict()
+        own = next(
+            item
+            for item in payload["lanes"]["center"]["deployments"]
+            if item["player_id"] == "p1"
+        )
+        own["formation_id"] = "division"
+        restored = GameState.from_dict(payload)
+        deployment = next(
+            item
+            for item in restored.lanes["center"].deployments
+            if item.player_id == "p1"
+        )
+        self.assertNotIn("formation_id", deployment.to_dict())
 
 
 if __name__ == "__main__":

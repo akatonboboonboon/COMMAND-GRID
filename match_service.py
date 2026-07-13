@@ -2,8 +2,8 @@
 
 The rules engine deliberately knows nothing about browsers or NiceGUI.  This
 module keeps one authoritative :class:`~game_engine.GameState` in
-``app.storage.user`` and snapshots the player's selected mode, formation and
-deck when a match starts.  Every value written here is JSON-compatible.
+``app.storage.user`` and snapshots the player's selected mode and deck when a
+match starts.  Every value written here is JSON-compatible.
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ def start_match(
     """Start or resume the active local match.
 
     ``reset=False`` resumes a valid stored match.  A new match snapshots the
-    selected deck, mode and formation from :mod:`player_state`; later settings
+    selected deck and mode from :mod:`player_state`; later settings
     changes therefore cannot alter a battle already in progress.
 
     The selected deck must satisfy the engine's normal nine-card minimum.  The
@@ -73,7 +73,6 @@ def start_match(
     player = ensure_player_state(storage)
     deck = list(player["deck"])
     mode = str(player["selected_mode"])
-    formation = str(player["selected_formation"])
     game = new_game(
         deck,
         STARTER_DECK,
@@ -86,7 +85,6 @@ def start_match(
     envelope = _new_envelope(
         game,
         mode=mode,
-        formation=formation,
         deck=deck,
     )
     storage[ACTIVE_MATCH_KEY] = envelope
@@ -126,7 +124,6 @@ def play_player_round(
     """Submit one player order, run the deterministic AI, and persist it.
 
     If no match exists, one is started from the current player settings.  The
-    formation captured at match start is attached to every player deployment.
     On the final round, the result is written to player history exactly once.
     """
 
@@ -140,7 +137,6 @@ def play_player_round(
         card_id,
         lane_id,
         ai_id=AI_PLAYER_ID,
-        formation_id=str(envelope["formation"]),
         ai_difficulty=_AI_DIFFICULTY_BY_MODE.get(
             str(envelope["mode"]), AiDifficulty.STANDARD
         ),
@@ -175,7 +171,6 @@ def get_match_context(storage: MutableMapping[str, Any]) -> dict[str, Any] | Non
     return {
         "game_id": state.game_id,
         "mode": str(envelope["mode"]),
-        "formation": str(envelope["formation"]),
         "deck": list(envelope["deck"]),
         "rewards": deepcopy(envelope.get("rewards", {"cards": [], "symbols": []})),
         "result_recorded": bool(envelope.get("result_recorded", False)),
@@ -186,7 +181,6 @@ def _new_envelope(
     state: GameState,
     *,
     mode: str,
-    formation: str,
     deck: list[str],
 ) -> dict[str, Any]:
     return {
@@ -195,7 +189,6 @@ def _new_envelope(
         "player_id": HUMAN_PLAYER_ID,
         "opponent_id": AI_PLAYER_ID,
         "mode": mode,
-        "formation": formation,
         "deck": list(deck),
         "rewards": {"cards": [], "symbols": []},
         "result_recorded": False,
@@ -213,7 +206,6 @@ def _normalize_envelope(
             raise ValueError("unsupported match service save")
         game_data = raw["game"]
         mode = raw.get("mode", player["selected_mode"])
-        formation = raw.get("formation", player["selected_formation"])
         deck = raw.get("deck", player["deck"])
         rewards = raw.get("rewards", {"cards": [], "symbols": []})
         result_recorded = bool(raw.get("result_recorded", False))
@@ -221,7 +213,6 @@ def _normalize_envelope(
         # Early prototypes stored GameState.to_dict() directly.
         game_data = raw
         mode = player["selected_mode"]
-        formation = player["selected_formation"]
         deck = player["deck"]
         rewards = {"cards": [], "symbols": []}
         result_recorded = False
@@ -230,8 +221,6 @@ def _normalize_envelope(
         raise ValueError("match game data must be a mapping")
     if mode not in {"training", "casual", "ranked", "friend"}:
         raise ValueError("invalid stored match mode")
-    if formation not in {"native", "battalion", "brigade", "division"}:
-        raise ValueError("invalid stored match formation")
     if (
         not isinstance(deck, list | tuple)
         or any(not isinstance(card_id, str) for card_id in deck)
@@ -254,7 +243,6 @@ def _normalize_envelope(
         "player_id": HUMAN_PLAYER_ID,
         "opponent_id": AI_PLAYER_ID,
         "mode": str(mode),
-        "formation": str(formation),
         "deck": list(deck),
         "rewards": {
             "cards": list(reward_cards),
@@ -315,7 +303,6 @@ def _record_completed_result_once(
         mission_points_against=int(points.get(AI_PLAYER_ID, 0)),
         turns=result.rounds_played,
         deck=list(envelope["deck"]),
-        formation=str(envelope["formation"]),
         summary=result.summary,
         unlocked_cards=reward_cards,
         unlocked_symbols=reward_symbols,

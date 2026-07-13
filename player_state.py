@@ -28,7 +28,7 @@ ACCOUNT_USERNAME_STORAGE_KEY = "account_username"
 ACCOUNT_SESSION_STORAGE_KEY = "account_session_token"
 ACCOUNT_SESSION_CACHE_STORAGE_KEY = "account_session_cache"
 ACCOUNT_SYNC_ERROR_STORAGE_KEY = "account_sync_error"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 MAX_DECK_SIZE = 12
 MAX_ADVANCED_DECK_SIZE = 24
 MIN_ADVANCED_DECK_SIZE = 12
@@ -37,7 +37,6 @@ DEFAULT_DISPLAY_NAME = "COMMANDER"
 DEFAULT_TAGLINE = "偵察から覚えています"
 
 VALID_MODES = frozenset({"training", "casual", "ranked", "friend", "simulation"})
-VALID_FORMATIONS = frozenset({"native", "battalion", "brigade", "division"})
 VALID_RESULTS = frozenset({"win", "loss", "draw"})
 
 PREFERENCE_DEFAULTS: dict[str, bool | str] = {
@@ -72,9 +71,6 @@ DEFAULT_UNLOCKED_SYMBOLS = tuple(
         if card_id in CARD_SYMBOL_IDS
     )
 )
-DEFAULT_UNLOCKED_FORMATIONS = ("native", "battalion", "brigade", "division")
-
-
 _MODE_ALIASES = {
     "practice": "training",
     "tutorial": "training",
@@ -90,14 +86,6 @@ _MODE_ALIASES = {
     "advanced": "simulation",
     "上級": "simulation",
     "本格シミュレーション": "simulation",
-}
-_FORMATION_ALIASES = {
-    "default": "native",
-    "card": "native",
-    "カード固有": "native",
-    "大隊": "battalion",
-    "旅団": "brigade",
-    "師団": "division",
 }
 _RESULT_ALIASES = {
     "victory": "win",
@@ -173,10 +161,8 @@ def default_player_state() -> dict[str, Any]:
         "collection": {
             "owned_cards": list(DEFAULT_OWNED_CARDS),
             "unlocked_symbols": list(DEFAULT_UNLOCKED_SYMBOLS),
-            "unlocked_formations": list(DEFAULT_UNLOCKED_FORMATIONS),
         },
         "deck": list(STARTER_DECK),
-        "selected_formation": "native",
         "selected_mode": "training",
         "progression": {
             "simulation_unlocked": False,
@@ -211,11 +197,6 @@ def normalize_player_state(raw: object) -> dict[str, Any]:
     state["preferences"] = _normalize_preferences(source)
     state["deck"] = _normalize_deck(source.get("deck"), collection["owned_cards"])
 
-    raw_formation = source.get("selected_formation", source.get("formation"))
-    formation = _normalize_formation(raw_formation)
-    if formation not in collection["unlocked_formations"]:
-        formation = "native"
-    state["selected_formation"] = formation
     state["selected_mode"] = _normalize_mode(
         source.get("selected_mode", source.get("mode"))
     )
@@ -520,19 +501,6 @@ def update_advanced_deck(state: object, card_ids: Sequence[str]) -> dict[str, An
     return updated
 
 
-def update_formation(state: object, formation: str) -> dict[str, Any]:
-    """Return state with one currently unlocked formation selected."""
-
-    canonical = _canonical_string(formation, _FORMATION_ALIASES)
-    if canonical not in VALID_FORMATIONS:
-        raise ValueError(f"Unknown formation: {formation}")
-    updated = normalize_player_state(state)
-    if canonical not in updated["collection"]["unlocked_formations"]:
-        raise ValueError(f"Formation is not unlocked: {canonical}")
-    updated["selected_formation"] = canonical
-    return updated
-
-
 def update_basic_tutorial_stage(state: object, stage: int) -> dict[str, Any]:
     """Advance the saved basic-game tutorial stage.
 
@@ -615,26 +583,22 @@ def unlock_collection(
     symbols: Iterable[str] = (),
     formations: Iterable[str] = (),
 ) -> dict[str, Any]:
-    """Return state with validated card, symbol, and formation unlocks added."""
+    """Return state with validated card and symbol unlocks added.
+
+    ``formations`` is retained only for compatibility with older callers and
+    reward payloads. Formation scale is no longer a gameplay feature, so any
+    supplied values are deliberately ignored.
+    """
 
     card_ids = _validated_unlock_ids(cards, set(CARD_INDEX), "card")
     symbol_ids = _validated_unlock_ids(symbols, set(SYMBOL_INDEX), "symbol")
-    formation_ids: list[str] = []
-    for value in _materialize_ids(formations, "formation"):
-        canonical = _canonical_string(value, _FORMATION_ALIASES)
-        if canonical not in VALID_FORMATIONS:
-            raise ValueError(f"Unknown formation ID: {value}")
-        if canonical not in formation_ids:
-            formation_ids.append(canonical)
+    del formations
 
     updated = normalize_player_state(state)
     collection = updated["collection"]
     collection["owned_cards"] = _ordered_union(collection["owned_cards"], card_ids)
     collection["unlocked_symbols"] = _ordered_union(
         collection["unlocked_symbols"], symbol_ids
-    )
-    collection["unlocked_formations"] = _ordered_union(
-        collection["unlocked_formations"], formation_ids
     )
     if set(CARD_INDEX).issubset(collection["owned_cards"]):
         updated["progression"]["simulation_unlocked"] = True
@@ -666,6 +630,10 @@ def record_result(
     to ``app.storage.user[PLAYER_STATE_KEY]``.
     """
 
+    # Compatibility-only arguments from pre-v4 saves and callers. Formation
+    # scale no longer affects play and is not written back into player state.
+    del formation, unlocked_formations
+
     canonical_result = _canonical_string(result, _RESULT_ALIASES)
     if canonical_result not in VALID_RESULTS:
         raise ValueError(f"Unknown battle result: {result}")
@@ -682,12 +650,9 @@ def record_result(
         state,
         cards=unlocked_cards,
         symbols=unlocked_symbols,
-        formations=unlocked_formations,
     )
     if mode is not None:
         updated = update_mode(updated, mode)
-    if formation is not None:
-        updated = update_formation(updated, formation)
     if deck is not None:
         updated = update_deck(updated, deck)
 
@@ -695,7 +660,6 @@ def record_result(
         "id": uuid4().hex,
         "result": canonical_result,
         "mode": updated["selected_mode"],
-        "formation": updated["selected_formation"],
         "deck": list(updated["deck"]),
         "opponent": _clean_optional_text(opponent, 80),
         "mission_points_for": points_for,
@@ -831,19 +795,9 @@ def _normalize_collection(source: Mapping[str, Any]) -> dict[str, list[str]]:
     symbols = _known_ids(symbols_source, set(SYMBOL_INDEX))
     symbols = _ordered_union(DEFAULT_UNLOCKED_SYMBOLS, symbols)
 
-    formations_source = collection.get(
-        "unlocked_formations", source.get("unlocked_formations")
-    )
-    formations = []
-    for value in _string_values(formations_source):
-        canonical = _canonical_string(value, _FORMATION_ALIASES)
-        if canonical in VALID_FORMATIONS and canonical not in formations:
-            formations.append(canonical)
-    formations = _ordered_union(DEFAULT_UNLOCKED_FORMATIONS, formations)
     return {
         "owned_cards": owned,
         "unlocked_symbols": symbols,
-        "unlocked_formations": formations,
     }
 
 
@@ -1013,7 +967,6 @@ def _normalize_history(raw: object, owned_cards: Sequence[str]) -> list[dict[str
         if battle_result not in VALID_RESULTS:
             continue
         mode = _normalize_mode(item.get("mode"))
-        formation = _normalize_formation(item.get("formation"))
         deck = _normalize_deck(item.get("deck", []), owned_cards)
         identifier = _clean_optional_text(item.get("id"), 80) or f"legacy-{index + 1}"
         played_at = _clean_optional_text(item.get("played_at"), 64) or ""
@@ -1023,7 +976,6 @@ def _normalize_history(raw: object, owned_cards: Sequence[str]) -> list[dict[str
                 "id": identifier,
                 "result": battle_result,
                 "mode": mode,
-                "formation": formation,
                 "deck": deck,
                 "opponent": _clean_optional_text(item.get("opponent"), 80),
                 "mission_points_for": _coerce_nonnegative_int(
@@ -1083,11 +1035,6 @@ def _normalize_stats(raw: object, history: Sequence[Mapping[str, Any]]) -> dict[
 def _normalize_mode(value: object) -> str:
     canonical = _canonical_string(value, _MODE_ALIASES)
     return canonical if canonical in VALID_MODES else "training"
-
-
-def _normalize_formation(value: object) -> str:
-    canonical = _canonical_string(value, _FORMATION_ALIASES)
-    return canonical if canonical in VALID_FORMATIONS else "native"
 
 
 def _canonical_string(value: object, aliases: Mapping[str, str]) -> str:

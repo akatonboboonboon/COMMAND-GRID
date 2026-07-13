@@ -2,9 +2,9 @@
 
 The reference sheet contains 201 symbols, but frames and echelon marks are not
 things a player can deploy.  ``ADVANCED_CATALOG`` retains all 201 stable source
-records for display and migration, while ``ADVANCED_CARDS`` contains only the
-180 cards that can actually be put in a deck.  Echelon marks are exposed as
-separate formation-size modifiers.
+records for collection display and migration, while ``ADVANCED_CARDS`` contains
+only the 180 cards that can actually be put in a deck.  Echelon marks are
+collection entries only and never modify battle rules.
 """
 
 from __future__ import annotations
@@ -16,20 +16,6 @@ from symbol_catalog import Domain, PlayKind, SYMBOL_CATALOG, SymbolDefinition
 
 
 RARITIES: tuple[str, ...] = ("標準", "専門", "精鋭", "希少")
-ADVANCED_ENTRY_KIND_CARD = "部隊・装備など"
-ADVANCED_ENTRY_KIND_SCALE = "部隊規模"
-ADVANCED_ENTRY_KINDS: tuple[str, ...] = (
-    ADVANCED_ENTRY_KIND_CARD,
-    ADVANCED_ENTRY_KIND_SCALE,
-)
-TASK_ORGANIZATION_SCALES: tuple[str, ...] = (
-    "軍団",
-    "師団",
-    "旅団",
-    "大隊",
-    "中隊",
-    "小隊",
-)
 NUMERIC_CAPABILITY_FIELDS: tuple[str, ...] = (
     "control",
     "support",
@@ -66,35 +52,6 @@ class AdvancedCard:
         data["domain"] = self.domain.value
         data["play_kind"] = self.play_kind.value
         return data
-
-
-@dataclass(frozen=True, slots=True)
-class AdvancedScale:
-    """A formation-size modifier attached to a playable unit card."""
-
-    id: str
-    name: str
-    symbol_id: str
-    control_delta: int
-    support_delta: int
-    recon_delta: int
-    supply_delta: int
-    command_delta: int
-    mobility_delta: int
-    description: str
-
-    def to_dict(self) -> dict[str, str | int]:
-        """Return a JSON-safe representation for APIs and saved decks."""
-
-        return asdict(self)
-
-    def stat_deltas(self) -> dict[str, int]:
-        """Return deltas using the same field names as :class:`AdvancedCard`."""
-
-        return {
-            field: getattr(self, f"{field}_delta")
-            for field in NUMERIC_CAPABILITY_FIELDS
-        }
 
 
 # These profiles describe only broad jobs.  Family and domain adjustments below
@@ -204,17 +161,6 @@ _PLAY_KIND_OVERRIDES: dict[str, PlayKind] = {
 }
 
 _NON_PLAYABLE_FAMILIES = frozenset(("frames", "echelon"))
-_SCALE_ATTACHABLE_KINDS = frozenset(
-    (PlayKind.UNIT, PlayKind.SUPPORT, PlayKind.TASK_FORCE)
-)
-_INTRINSIC_SCALE_IDS: dict[str, str] = {
-    "advanced_task_organizations_04": "advanced_echelon_04",
-    "advanced_task_organizations_05": "advanced_echelon_05",
-    "advanced_task_organizations_06": "advanced_echelon_06",
-    "advanced_task_organizations_07": "advanced_echelon_08",
-    "advanced_task_organizations_08": "advanced_echelon_09",
-    "advanced_task_organizations_09": "advanced_echelon_10",
-}
 
 
 def _stable_seed(value: str) -> int:
@@ -321,129 +267,6 @@ def get_advanced_card_for_symbol(symbol_id: str) -> AdvancedCard:
     return ADVANCED_SYMBOL_INDEX[symbol_id]
 
 
-# control, support, recon, supply, command, mobility, description
-_SCALE_PROFILES: dict[str, tuple[int, int, int, int, int, int, str]] = {
-    "echelon_01": (3, 2, -2, -3, 3, -3, "最大級の編制。制圧・支援・指揮は非常に高いが、補給負担が重く機動しにくい。"),
-    "echelon_02": (3, 2, -2, -3, 3, -3, "複数の軍を束ねる編制。広域を動かせる一方、補給と機動に大きな負担がある。"),
-    "echelon_03": (2, 2, -1, -2, 2, -2, "広い正面を担当する大規模編制。制圧と支援に優れるが、即応性は低い。"),
-    "echelon_04": (2, 1, -1, -2, 2, -2, "複数師団を指揮する編制。指揮と制圧を高める代わりに補給を多く使う。"),
-    "echelon_05": (2, 1, -1, -1, 1, -1, "独立して広い戦線を担える大編制。制圧力は高いが、やや重くなる。"),
-    "echelon_06": (1, 1, 0, -1, 1, -1, "複数任務をこなせる中大型編制。戦力を底上げするが補給負担も増える。"),
-    "echelon_07": (1, 0, 0, -1, 1, 0, "まとまった戦力を持つ中規模編制。制圧と指揮を少し高める。"),
-    "echelon_08": (1, 0, 0, 0, 0, 0, "戦線の一角を担当する中規模編制。扱いやすく、制圧力を少し高める。"),
-    "echelon_09": (0, 0, 0, 0, 0, 0, "標準となる部隊規模。能力への補正はなく、カード本来の性能で運用する。"),
-    "echelon_10": (-1, 0, 1, 0, -1, 1, "小回りの利く小規模編制。制圧と指揮を下げ、偵察と機動を高める。"),
-    "echelon_11": (-1, -1, 1, 1, -1, 1, "独立行動しやすい小部隊。正面戦闘より偵察と機動に向く。"),
-    "echelon_12": (-1, -1, 1, 1, -1, 1, "小人数で動く分隊。軽い補給で素早く行動できるが、大きな制圧には不向き。"),
-    "echelon_13": (-2, -1, 1, 1, -1, 2, "最小級の行動単位。機動性は高いが、制圧・支援能力は限定される。"),
-    "echelon_14": (0, 0, 0, 0, 0, 0, "規模を特定しない汎用の階梯。能力補正を付けずに運用する。"),
-}
-
-
-def build_advanced_scales() -> tuple[AdvancedScale, ...]:
-    """Build the 14 attachable formation-size modifiers in source order."""
-
-    scales: list[AdvancedScale] = []
-    for entry in ADVANCED_CATALOG:
-        if entry.family != "echelon":
-            continue
-        profile = _SCALE_PROFILES[entry.symbol_id]
-        scales.append(
-            AdvancedScale(
-                id=entry.id,
-                name=entry.name,
-                symbol_id=entry.symbol_id,
-                control_delta=profile[0],
-                support_delta=profile[1],
-                recon_delta=profile[2],
-                supply_delta=profile[3],
-                command_delta=profile[4],
-                mobility_delta=profile[5],
-                description=profile[6],
-            )
-        )
-    return tuple(scales)
-
-
-ADVANCED_SCALE_CARDS: tuple[AdvancedScale, ...] = build_advanced_scales()
-# Shorter alias used by the simulation engine and AI when iterating modifiers.
-ADVANCED_SCALES = ADVANCED_SCALE_CARDS
-ADVANCED_SCALE_INDEX = {scale.id: scale for scale in ADVANCED_SCALE_CARDS}
-DEFAULT_ADVANCED_SCALE_ID = "advanced_echelon_09"
-
-
-def get_advanced_scale(scale_id: str) -> AdvancedScale:
-    """Return one formation-size modifier."""
-
-    return ADVANCED_SCALE_INDEX[scale_id]
-
-
-def intrinsic_advanced_scale_id(card: AdvancedCard) -> str | None:
-    """Return the fixed scale already encoded in a task-organization name."""
-
-    return _INTRINSIC_SCALE_IDS.get(card.id)
-
-
-def can_attach_advanced_scale(card: AdvancedCard) -> bool:
-    """Return whether a unit-like playable card accepts a size modifier."""
-
-    return (
-        is_playable_advanced_card(card)
-        and card.play_kind in _SCALE_ATTACHABLE_KINDS
-        and intrinsic_advanced_scale_id(card) is None
-    )
-
-
-def scaled_advanced_stats(
-    card: AdvancedCard,
-    scale: AdvancedScale | str | None = None,
-) -> dict[str, int]:
-    """Return public-range stats after applying one formation-size modifier."""
-
-    intrinsic_id = intrinsic_advanced_scale_id(card)
-    if intrinsic_id is None and not can_attach_advanced_scale(card):
-        raise ValueError(f"formation size cannot be attached to {card.id}")
-    requested_id = scale.id if isinstance(scale, AdvancedScale) else scale
-    if intrinsic_id is not None and requested_id not in (None, intrinsic_id):
-        raise ValueError(f"{card.id} has fixed formation size {intrinsic_id}")
-    resolved = intrinsic_id or requested_id or DEFAULT_ADVANCED_SCALE_ID
-    modifier = get_advanced_scale(resolved) if isinstance(resolved, str) else resolved
-    if not isinstance(modifier, AdvancedScale):
-        raise TypeError("scale must be an AdvancedScale or scale ID")
-    return {
-        field: max(
-            _LOWER_BOUNDS[field],
-            min(
-                _UPPER_BOUNDS[field],
-                getattr(card, field) + getattr(modifier, f"{field}_delta"),
-            ),
-        )
-        for field in NUMERIC_CAPABILITY_FIELDS
-    }
-
-
-def advanced_entry_kind(card: AdvancedCard) -> str:
-    """Classify a source record as a card-like symbol or a pure echelon."""
-
-    return (
-        ADVANCED_ENTRY_KIND_SCALE
-        if card.family == "echelon"
-        else ADVANCED_ENTRY_KIND_CARD
-    )
-
-
-def advanced_name_and_scale(card: AdvancedCard) -> tuple[str | None, str | None]:
-    """Return display name and scale separately while retaining the source card ID."""
-
-    if card.family == "echelon":
-        return None, card.name
-    if card.family == "task_organizations":
-        for scale in TASK_ORGANIZATION_SCALES:
-            if card.name == f"任務{scale}":
-                return "任務部隊", scale
-    return card.name, None
-
-
 def _enum_value(value: Domain | PlayKind | str | None) -> str | None:
     if value is None:
         return None
@@ -459,7 +282,6 @@ def search_advanced_cards(
     domain: Domain | str | None = None,
     play_kind: PlayKind | str | None = None,
     rarity: str | None = None,
-    entry_kind: str | None = None,
 ) -> tuple[AdvancedCard, ...]:
     """Search and filter cards while preserving canonical catalog order."""
 
@@ -468,9 +290,6 @@ def search_advanced_cards(
     kind_value = _enum_value(play_kind)
     family_value = None if family is None else str(family)
     rarity_value = None if rarity is None else str(rarity)
-    entry_kind_value = None if entry_kind is None else str(entry_kind)
-    if entry_kind_value is not None and entry_kind_value not in ADVANCED_ENTRY_KINDS:
-        return ()
 
     matches: list[AdvancedCard] = []
     for card in ADVANCED_CARDS:
@@ -481,8 +300,6 @@ def search_advanced_cards(
                 card.name,
                 card.family,
                 card.plain_role,
-                advanced_entry_kind(card),
-                *(part for part in advanced_name_and_scale(card) if part),
             )
         ).casefold()
         if needle and needle not in searchable:
@@ -494,8 +311,6 @@ def search_advanced_cards(
         if kind_value is not None and card.play_kind.value != kind_value:
             continue
         if rarity_value is not None and card.rarity != rarity_value:
-            continue
-        if entry_kind_value is not None and advanced_entry_kind(card) != entry_kind_value:
             continue
         matches.append(card)
     return tuple(matches)
@@ -666,32 +481,16 @@ __all__ = (
     "ADVANCED_CATALOG_INDEX",
     "ADVANCED_CARDS",
     "ADVANCED_CARD_INDEX",
-    "ADVANCED_ENTRY_KIND_CARD",
-    "ADVANCED_ENTRY_KIND_SCALE",
-    "ADVANCED_ENTRY_KINDS",
-    "ADVANCED_SCALE_CARDS",
-    "ADVANCED_SCALE_INDEX",
-    "ADVANCED_SCALES",
     "ADVANCED_STARTER_DECK",
     "ADVANCED_SYMBOL_INDEX",
-    "DEFAULT_ADVANCED_SCALE_ID",
     "AdvancedCard",
-    "AdvancedScale",
     "NUMERIC_CAPABILITY_FIELDS",
     "RARITIES",
-    "TASK_ORGANIZATION_SCALES",
-    "advanced_entry_kind",
-    "advanced_name_and_scale",
     "build_advanced_catalog",
-    "build_advanced_scales",
     "build_balanced_deck",
-    "can_attach_advanced_scale",
     "get_advanced_card",
     "get_advanced_card_for_symbol",
     "get_advanced_catalog_entry",
-    "get_advanced_scale",
-    "intrinsic_advanced_scale_id",
     "is_playable_advanced_card",
-    "scaled_advanced_stats",
     "search_advanced_cards",
 )

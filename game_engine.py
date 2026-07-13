@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Iterable, Mapping, Sequence
 
-from game_data import STARTER_DECK, UnitCard, get_card, get_formation
+from game_data import STARTER_DECK, UnitCard, get_card
 
 
 LANE_IDS: tuple[str, ...] = ("left", "center", "right")
@@ -33,24 +33,6 @@ LANE_LABELS: dict[str, str] = {
 MAX_ROUNDS = 9
 MISSION_POINTS_PER_LANE = 1
 ARMOR_SUPPLY_BONUS = 2
-
-# The value is metadata only; card balance continues to come from game_data.
-# Unknown future echelons remain playable and simply receive ``rank=None``.
-FORMATION_SCALE: dict[str, int] = {
-    "班": 1,
-    "分隊": 2,
-    "小隊": 3,
-    "中隊": 4,
-    "大隊": 5,
-    "連隊": 6,
-    "旅団": 7,
-    "師団": 8,
-    "軍団": 9,
-    "軍": 10,
-    "軍集団": 11,
-    "総軍": 12,
-}
-
 
 class Phase(StrEnum):
     PLANNING = "planning"
@@ -97,41 +79,20 @@ def lookup_card(card_id: str) -> UnitCard:
         raise RuleViolation("unknown_card", f"存在しないカードです: {card_id}") from exc
 
 
-def formation_metadata(formation_id: str | None = None) -> dict[str, Any]:
-    """Return the canonical formation selector metadata from ``game_data``."""
-
-    requested = "native" if formation_id is None else str(formation_id)
-    formation = get_formation(requested)
-    _require(
-        formation.id == requested,
-        "unknown_formation",
-        f"存在しない編制規模です: {requested}",
-    )
-    return {
-        "id": formation.id,
-        "name": formation.name,
-        "marker": formation.marker,
-        "catalog_symbol_id": formation.catalog_symbol_id,
-    }
-
-
 def card_metadata(card_id: str, formation_id: str | None = None) -> dict[str, Any]:
-    """Return UI-safe card and formation metadata from the canonical lookup."""
+    """Return UI-safe combat metadata for one card.
 
+    ``formation_id`` is accepted only so older callers do not fail; formation
+    size no longer affects or appears in battles.
+    """
+
+    del formation_id
     card = lookup_card(card_id)
-    formation = formation_metadata(formation_id)
-    effective_echelon = card.echelon if formation["id"] == "native" else formation["name"]
-    rank = FORMATION_SCALE.get(effective_echelon)
     return {
         "id": card.id,
         "name": card.name,
         "branch": card.branch,
         "symbol": card.symbol,
-        "echelon": effective_echelon,
-        "native_echelon": card.echelon,
-        "formation_rank": rank,
-        "large_formation": rank is not None and rank >= FORMATION_SCALE["旅団"],
-        "formation": formation,
         "cost": card.cost,
         "control": card.control,
         "support": card.support,
@@ -146,7 +107,6 @@ class Order:
     card_id: str
     lane_id: str
     round_no: int
-    formation_id: str = "native"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -154,7 +114,6 @@ class Order:
             "card_id": self.card_id,
             "lane_id": self.lane_id,
             "round_no": self.round_no,
-            "formation_id": self.formation_id,
         }
 
     @classmethod
@@ -164,7 +123,6 @@ class Order:
             card_id=str(data["card_id"]),
             lane_id=str(data["lane_id"]),
             round_no=int(data["round_no"]),
-            formation_id=str(data.get("formation_id", "native")),
         )
 
 
@@ -175,7 +133,6 @@ class Deployment:
     card_id: str
     lane_id: str
     round_deployed: int
-    formation_id: str = "native"
     revealed_to: list[str] = field(default_factory=list)
 
     def visible_to(self, player_id: str) -> bool:
@@ -188,7 +145,6 @@ class Deployment:
             "card_id": self.card_id,
             "lane_id": self.lane_id,
             "round_deployed": self.round_deployed,
-            "formation_id": self.formation_id,
             "revealed_to": list(self.revealed_to),
         }
 
@@ -200,7 +156,6 @@ class Deployment:
             card_id=str(data["card_id"]),
             lane_id=str(data["lane_id"]),
             round_deployed=int(data["round_deployed"]),
-            formation_id=str(data.get("formation_id", "native")),
             revealed_to=[str(value) for value in data.get("revealed_to", [])],
         )
 
@@ -491,7 +446,7 @@ class GameState:
                 source = _deployment_by_id(self, deployment_data["deployment_id"])
                 if source.visible_to(player_id) or self.phase is Phase.COMPLETE:
                     deployment_data["hidden"] = False
-                    deployment_data["card"] = card_metadata(source.card_id, source.formation_id)
+                    deployment_data["card"] = card_metadata(source.card_id)
                 else:
                     deployment_data["hidden"] = True
                     deployment_data["card_id"] = None
@@ -661,17 +616,20 @@ def submit_order(
     lane_id: str,
     formation_id: str | None = None,
 ) -> Order:
-    """Lock one secret deployment order for the current round."""
+    """Lock one secret deployment order for the current round.
 
+    The legacy ``formation_id`` argument is intentionally ignored.
+    """
+
+    del formation_id
     _require(state.phase is Phase.PLANNING, "wrong_phase", "現在は命令を選べません。")
     player = _player(state, player_id)
     _lane(state, lane_id)
     lookup_card(card_id)
-    formation = formation_metadata(formation_id)
     _require(player_id not in state.orders, "order_already_submitted", "このラウンドの命令は確定済みです。")
     _require(card_id in player.hand, "card_not_in_hand", "そのカードは手札にありません。")
 
-    order = Order(player_id, card_id, lane_id, state.round_no, formation["id"])
+    order = Order(player_id, card_id, lane_id, state.round_no)
     state.orders[player_id] = order
     _event(
         state,
@@ -861,7 +819,6 @@ def _choose_easy_ai_order(state: GameState, player_id: str) -> Order:
         card_id=card_id,
         lane_id=lane_id,
         round_no=state.round_no,
-        formation_id="native",
     )
 
 
@@ -974,7 +931,6 @@ def choose_ai_order(
         card_id=best[1],
         lane_id=best[2],
         round_no=state.round_no,
-        formation_id="native",
     )
 
 
@@ -990,7 +946,6 @@ def play_ai_turn(
         order.player_id,
         order.card_id,
         order.lane_id,
-        order.formation_id,
     )
 
 
@@ -1007,11 +962,10 @@ def _deploy_orders(state: GameState) -> None:
             card_id=order.card_id,
             lane_id=order.lane_id,
             round_deployed=state.round_no,
-            formation_id=order.formation_id,
             revealed_to=[player_id],
         )
         state.lanes[order.lane_id].deployments.append(deployment)
-        deployed_card = card_metadata(order.card_id, order.formation_id)
+        deployed_card = card_metadata(order.card_id)
         _event(
             state,
             "deployed",
@@ -1022,13 +976,10 @@ def _deploy_orders(state: GameState) -> None:
         _event(
             state,
             "own_card_deployed",
-            (
-                f"部隊名：{deployed_card['name']}／部隊規模：{deployed_card['echelon']}を"
-                f"{LANE_LABELS[order.lane_id]}へ配備しました。"
-            ),
+            f"{deployed_card['name']}を{LANE_LABELS[order.lane_id]}へ配備しました。",
             player_id=player_id,
             lane_id=order.lane_id,
-            details={"card_id": order.card_id, "formation_id": order.formation_id},
+            details={"card_id": order.card_id},
             visible_to=[player_id],
         )
 
@@ -1258,7 +1209,6 @@ def validate_state(state: GameState) -> None:
             _require(1 <= deployment.round_deployed <= state.round_no, "invalid_state", "配備ラウンドが不正です。")
             _require(set(deployment.revealed_to).issubset(state.players), "invalid_state", "公開先が不正です。")
             lookup_card(deployment.card_id)
-            formation_metadata(deployment.formation_id)
     _require(len(all_deployment_ids) == len(set(all_deployment_ids)), "invalid_state", "配備IDが重複しています。")
 
     for owner_id, order in state.orders.items():
@@ -1267,7 +1217,6 @@ def validate_state(state: GameState) -> None:
         _require(order.lane_id in LANE_IDS, "invalid_state", "命令の戦線が不正です。")
         _require(order.card_id in state.players[owner_id].hand, "invalid_state", "命令カードが手札にありません。")
         lookup_card(order.card_id)
-        formation_metadata(order.formation_id)
 
     if state.phase is Phase.PLANNING:
         _require(len(state.orders) < 2, "invalid_state", "命令が揃った状態は解決フェーズです。")
@@ -1289,7 +1238,6 @@ def validate_state(state: GameState) -> None:
 __all__ = [
     "AiDifficulty",
     "ARMOR_SUPPLY_BONUS",
-    "FORMATION_SCALE",
     "LANE_IDS",
     "LANE_LABELS",
     "MAX_ROUNDS",
@@ -1308,7 +1256,6 @@ __all__ = [
     "cancel_order",
     "card_metadata",
     "choose_ai_order",
-    "formation_metadata",
     "lookup_card",
     "new_game",
     "play_ai_turn",
