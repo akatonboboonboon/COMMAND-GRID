@@ -1,18 +1,27 @@
 """Deterministic data for COMMAND GRID's advanced simulation mode.
 
-The reference sheet contains 201 symbols, but frames and echelon marks are not
-things a player can deploy.  ``ADVANCED_CATALOG`` retains all 201 stable source
-records for collection display and migration, while ``ADVANCED_CARDS`` contains
-only the 180 cards that can actually be put in a deck.  Echelon marks are
-collection entries only and never modify battle rules.
+The reference sheet's 201 symbols are the immutable collection catalog.  The
+advanced battle roster is intentionally separate: one source symbol may produce
+several named cards, and symbols omitted by the reviewed roster remain visible
+in the collection without becoming playable.  The canonical 121-card roster is
+loaded from :mod:`CARD_NAMES_FOR_REVIEW.csv`.
 """
 
 from __future__ import annotations
 
+import csv
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Iterable
 
-from symbol_catalog import Domain, PlayKind, SYMBOL_CATALOG, SymbolDefinition
+from symbol_catalog import (
+    FAMILY_INDEX,
+    Domain,
+    PlayKind,
+    SYMBOL_CATALOG,
+    SYMBOL_INDEX,
+    SymbolDefinition,
+)
 
 
 RARITIES: tuple[str, ...] = ("標準", "専門", "精鋭", "希少")
@@ -44,8 +53,9 @@ class AdvancedCard:
     mobility: int
     rarity: str
     plain_role: str
+    catalog_number: int | None
 
-    def to_dict(self) -> dict[str, str | int]:
+    def to_dict(self) -> dict[str, str | int | None]:
         """Return a JSON-safe representation for APIs and saved match data."""
 
         data = asdict(self)
@@ -54,92 +64,48 @@ class AdvancedCard:
         return data
 
 
-# These profiles describe only broad jobs.  Family and domain adjustments below
-# provide the detail, while the stable per-symbol variation prevents a family
-# from becoming 11 identical cards.
-_KIND_PROFILES: dict[PlayKind, dict[str, int]] = {
-    PlayKind.UNIT: {
-        "control": 3,
-        "support": 1,
-        "recon": 1,
-        "supply": -1,
-        "command": 1,
-        "mobility": 3,
-    },
-    PlayKind.SUPPORT: {
-        "control": 1,
-        "support": 3,
-        "recon": 2,
-        "supply": 1,
-        "command": 1,
-        "mobility": 2,
-    },
-    PlayKind.FACILITY: {
-        "control": 2,
-        "support": 2,
-        "recon": 1,
-        "supply": 3,
-        "command": 3,
-        "mobility": 0,
-    },
-    PlayKind.ENTITY: {
-        "control": 2,
-        "support": 2,
-        "recon": 2,
-        "supply": -1,
-        "command": 1,
-        "mobility": 4,
-    },
-    PlayKind.TASK_FORCE: {
-        "control": 2,
-        "support": 2,
-        "recon": 2,
-        "supply": 1,
-        "command": 5,
-        "mobility": 2,
-    },
-    PlayKind.VISUAL: {
-        "control": 1,
-        "support": 1,
-        "recon": 1,
-        "supply": 1,
-        "command": 3,
-        "mobility": 1,
-    },
+# Broad family jobs are the base of the automatic allocation.  The two small
+# seeded variations and visible name-keyword adjustments below stop cards with
+# the same classification from becoming numerically identical.
+_FAMILY_STAT_PROFILES: dict[str, tuple[int, int, int, int, int, int]] = {
+    "naval_units": (3, 2, 1, -2, 1, 2),
+    "aviation_units": (2, 2, 3, -2, 1, 3),
+    "special_operations": (2, 1, 3, 0, 2, 3),
+    "infantry": (4, 1, 1, 0, 1, 1),
+    "infantry_support": (1, 2, 4, 0, 1, 2),
+    "armor": (5, 1, 1, -3, 1, 2),
+    "engineer": (2, 3, 1, 1, 1, 1),
+    "artillery": (1, 5, 1, -2, 1, 0),
+    "air_antiarmor": (2, 4, 2, -2, 1, 1),
+    "information_support": (1, 2, 4, 0, 3, 1),
+    "logistics": (1, 2, 1, 5, 2, 1),
+    "other_organizations": (2, 2, 2, 1, 4, 1),
 }
 
-
-_DOMAIN_ADJUSTMENTS: dict[Domain, dict[str, int]] = {
-    Domain.JOINT: {"support": 1, "command": 1},
-    Domain.LAND: {"control": 1},
-    Domain.AIR: {"recon": 1, "supply": -1, "mobility": 1},
-    Domain.SEA: {"support": 1, "supply": -1, "command": 1},
-    Domain.SPECIAL: {"recon": 1, "supply": -1, "command": 1},
-    Domain.GENERIC: {"supply": 1},
+ADVANCED_FAMILY_NAMES: dict[str, str] = {
+    "海軍組織": "naval_units",
+    "航空組織": "aviation_units",
+    "特殊作戦組織": "special_operations",
+    "歩兵組織": "infantry",
+    "偵察支援": "infantry_support",
+    "機甲組織": "armor",
+    "工兵組織": "engineer",
+    "砲兵組織": "artillery",
+    "防空・対戦車・ミサイル": "air_antiarmor",
+    "情報・通信・治安支援": "information_support",
+    "後方支援組織": "logistics",
+    "その他の組織": "other_organizations",
 }
 
-
-_FAMILY_ADJUSTMENTS: dict[str, dict[str, int]] = {
-    "frames": {"command": 1},
-    "joint": {"command": 1},
-    "naval_units": {"support": 1, "mobility": 1},
-    "aviation_units": {"recon": 1, "mobility": 1},
-    "special_operations": {"recon": 1, "mobility": 1},
-    "infantry": {"control": 2},
-    "infantry_support": {"support": 1, "recon": 1},
-    "armor": {"control": 2, "supply": -1, "mobility": 1},
-    "engineer": {"support": 1, "supply": 1},
-    "artillery": {"support": 2, "supply": -1},
-    "air_antiarmor": {"support": 1, "recon": 1},
-    "information_support": {"recon": 2, "command": 1},
-    "logistics": {"support": 1, "supply": 3},
-    "ground_entities": {"control": 1, "mobility": 1},
-    "air_space_entities": {"recon": 1, "mobility": 1},
-    "sea_entities": {"support": 1, "mobility": 1},
-    "echelon": {"command": 2},
-    "task_organizations": {"command": 2},
-    "other_organizations": {"supply": 1, "command": 1},
-}
+_KEYWORD_ADJUSTMENTS: tuple[tuple[tuple[str, ...], dict[str, int]], ...] = (
+    (("偵察", "観測", "警戒", "諜報", "測量", "気象"), {"recon": 1}),
+    (("重", "戦艦", "装甲"), {"control": 1, "mobility": -1, "supply": -1}),
+    (("砲", "ミサイル", "射撃", "ロケット"), {"support": 1, "supply": -1}),
+    (("補給", "整備", "輸送", "燃料", "食糧", "衛生", "弾薬"), {"supply": 1}),
+    (("司令", "管制", "通信", "電子戦", "心理戦"), {"command": 1}),
+    (("航空", "空軍", "ヘリ", "戦闘機", "空挺", "高機動"), {"mobility": 1}),
+    (("基地", "拠点"), {"control": 1, "command": 1, "mobility": -1}),
+)
 
 
 _LOWER_BOUNDS = {
@@ -153,14 +119,7 @@ _LOWER_BOUNDS = {
 _UPPER_BOUNDS = {field: 6 for field in NUMERIC_CAPABILITY_FIELDS}
 
 
-# Both records describe physical bases.  The reference sheet groups them with
-# organizations, but in the game they remain deployable facility cards.
-_PLAY_KIND_OVERRIDES: dict[str, PlayKind] = {
-    "naval_units_01": PlayKind.FACILITY,
-    "task_organizations_02": PlayKind.FACILITY,
-}
-
-_NON_PLAYABLE_FAMILIES = frozenset(("frames", "echelon"))
+ADVANCED_ROSTER_PATH = Path(__file__).with_name("CARD_NAMES_FOR_REVIEW.csv")
 
 
 def _stable_seed(value: str) -> int:
@@ -174,9 +133,9 @@ def _add_adjustments(stats: dict[str, int], changes: dict[str, int]) -> None:
         stats[field] += amount
 
 
-def _rarity_for(symbol: SymbolDefinition) -> str:
+def _rarity_for_value(value: str) -> str:
     # Rarity is collectible variety, not a hidden numerical power modifier.
-    roll = _stable_seed(symbol.id) % 20
+    roll = _stable_seed(value) % 20
     if roll == 0:
         return "希少"
     if roll <= 3:
@@ -186,19 +145,35 @@ def _rarity_for(symbol: SymbolDefinition) -> str:
     return "標準"
 
 
-def _stats_for(
-    symbol: SymbolDefinition,
-    play_kind: PlayKind | None = None,
+def allocate_advanced_stats(
+    family: str,
+    card_id: str,
+    name: str,
 ) -> dict[str, int]:
-    stats = dict(_KIND_PROFILES[play_kind or symbol.play_kind])
-    _add_adjustments(stats, _DOMAIN_ADJUSTMENTS[symbol.domain])
-    _add_adjustments(stats, _FAMILY_ADJUSTMENTS[symbol.family_id])
+    """Allocate deterministic capabilities from family, stable ID and name.
 
-    # One modest point of variation gives each symbol a numerical identity while
-    # keeping every value inside the same public balance envelope.
-    variation_fields = ("control", "support", "recon", "command", "mobility")
-    variation_field = variation_fields[_stable_seed(symbol.id) % len(variation_fields)]
-    stats[variation_field] += 1
+    ``family`` accepts either the internal family ID or the Japanese CSV label.
+    The returned mapping is independent of CSV row order, Python's randomized
+    hash seed and any mutable game state.
+    """
+
+    family_id = ADVANCED_FAMILY_NAMES.get(str(family).strip(), str(family).strip())
+    if family_id not in _FAMILY_STAT_PROFILES:
+        raise KeyError(f"unknown advanced card family: {family}")
+
+    stats = dict(zip(NUMERIC_CAPABILITY_FIELDS, _FAMILY_STAT_PROFILES[family_id]))
+    seed = _stable_seed(f"{str(card_id).strip()}|{str(name).strip()}")
+    boost_index = seed % len(NUMERIC_CAPABILITY_FIELDS)
+    penalty_index = (seed // 7) % len(NUMERIC_CAPABILITY_FIELDS)
+    if penalty_index == boost_index:
+        penalty_index = (penalty_index + 1) % len(NUMERIC_CAPABILITY_FIELDS)
+    stats[NUMERIC_CAPABILITY_FIELDS[boost_index]] += 1
+    stats[NUMERIC_CAPABILITY_FIELDS[penalty_index]] -= 1
+
+    final_name = str(name).strip()
+    for keywords, adjustment in _KEYWORD_ADJUSTMENTS:
+        if any(keyword in final_name for keyword in keywords):
+            _add_adjustments(stats, adjustment)
 
     return {
         field: max(_LOWER_BOUNDS[field], min(_UPPER_BOUNDS[field], stats[field]))
@@ -209,23 +184,29 @@ def _stats_for(
 def is_playable_advanced_card(card: AdvancedCard) -> bool:
     """Return whether a catalog record may be placed in a deck."""
 
-    return card.family not in _NON_PLAYABLE_FAMILIES
+    return card.catalog_number is not None
 
 
 def build_advanced_catalog() -> tuple[AdvancedCard, ...]:
-    """Build the complete catalog in the source sheet's stable order."""
+    """Build the complete 201-symbol collection catalog in stable sheet order."""
 
     cards: list[AdvancedCard] = []
     for symbol in SYMBOL_CATALOG:
-        play_kind = _PLAY_KIND_OVERRIDES.get(symbol.id, symbol.play_kind)
-        stats = _stats_for(symbol, play_kind)
+        family_for_stats = (
+            symbol.family_id
+            if symbol.family_id in _FAMILY_STAT_PROFILES
+            else "other_organizations"
+        )
+        stats = allocate_advanced_stats(
+            family_for_stats, f"advanced_{symbol.id}", symbol.name
+        )
         cards.append(
             AdvancedCard(
                 id=f"advanced_{symbol.id}",
                 name=symbol.name,
                 family=symbol.family_id,
                 domain=symbol.domain,
-                play_kind=play_kind,
+                play_kind=symbol.play_kind,
                 symbol_id=symbol.id,
                 control=stats["control"],
                 support=stats["support"],
@@ -233,8 +214,133 @@ def build_advanced_catalog() -> tuple[AdvancedCard, ...]:
                 supply=stats["supply"],
                 command=stats["command"],
                 mobility=stats["mobility"],
-                rarity=_rarity_for(symbol),
+                rarity=_rarity_for_value(f"advanced_{symbol.id}"),
                 plain_role=symbol.plain_role,
+                catalog_number=None,
+            )
+        )
+    return tuple(cards)
+
+
+_CSV_STAT_COLUMNS: dict[str, str] = {
+    "制圧": "control",
+    "支援": "support",
+    "偵察": "recon",
+    "補給": "supply",
+    "指揮": "command",
+    "機動": "mobility",
+}
+_ADVANCED_ROSTER_COLUMNS = (
+    "カタログ",
+    "番号",
+    "カードID",
+    "元記号ID",
+    "分類",
+    "現在の部隊・カード名",
+    "変更後の部隊・カード名",
+    *_CSV_STAT_COLUMNS,
+)
+
+
+def _play_kind_for_roster_card(
+    source: SymbolDefinition,
+    family: str,
+    current_name: str,
+    final_name: str,
+) -> PlayKind:
+    if source.play_kind == PlayKind.FACILITY:
+        return PlayKind.FACILITY
+    facility_text = f"{source.name} {current_name} {final_name}"
+    if any(keyword in facility_text for keyword in ("基地", "拠点")):
+        return PlayKind.FACILITY
+    return FAMILY_INDEX[family].play_kind
+
+
+def load_advanced_roster(
+    path: str | Path = ADVANCED_ROSTER_PATH,
+) -> tuple[AdvancedCard, ...]:
+    """Load and validate the reviewed canonical 121-card battle roster."""
+
+    roster_path = Path(path)
+    with roster_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if tuple(reader.fieldnames or ()) != _ADVANCED_ROSTER_COLUMNS:
+            raise ValueError(
+                f"{roster_path.name} must have the canonical 13-column schema"
+            )
+        rows = [
+            row
+            for row in reader
+            if str(row.get("カタログ", "")).strip().startswith("本格")
+        ]
+
+    if len(rows) != 121:
+        raise ValueError("advanced roster must contain exactly 121 rows")
+
+    cards: list[AdvancedCard] = []
+    seen_ids: set[str] = set()
+    for expected_number, row in enumerate(rows, 1):
+        try:
+            number = int(str(row["番号"]).strip())
+        except (TypeError, ValueError) as error:
+            raise ValueError("advanced roster numbers must be integers") from error
+        if number != expected_number:
+            raise ValueError("advanced roster numbers must be consecutive from 1 to 121")
+
+        card_id = str(row["カードID"]).strip()
+        if not card_id.startswith("advanced_") or card_id in seen_ids:
+            raise ValueError(f"invalid or duplicate advanced card ID: {card_id}")
+        seen_ids.add(card_id)
+
+        symbol_id = str(row["元記号ID"]).strip()
+        if symbol_id.startswith("advanced_"):
+            symbol_id = symbol_id.removeprefix("advanced_")
+        try:
+            source = SYMBOL_INDEX[symbol_id]
+        except KeyError as error:
+            raise ValueError(f"unknown source symbol ID: {symbol_id}") from error
+
+        family_label = str(row["分類"]).strip()
+        try:
+            family = ADVANCED_FAMILY_NAMES[family_label]
+        except KeyError as error:
+            raise ValueError(f"unknown advanced classification: {family_label}") from error
+        current_name = str(row["現在の部隊・カード名"]).strip()
+        changed_name = str(row["変更後の部隊・カード名"]).strip()
+        final_name = changed_name or current_name
+        if not final_name:
+            raise ValueError(f"advanced card {card_id} has no name")
+
+        allocated = allocate_advanced_stats(family, card_id, final_name)
+        try:
+            csv_stats = {
+                field: int(str(row[column]).strip())
+                for column, field in _CSV_STAT_COLUMNS.items()
+            }
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"advanced card {card_id} has invalid numeric stats") from error
+        if csv_stats != allocated:
+            raise ValueError(f"advanced card {card_id} stats do not match allocation")
+
+        cards.append(
+            AdvancedCard(
+                id=card_id,
+                name=final_name,
+                family=family,
+                domain=FAMILY_INDEX[family].domain,
+                play_kind=_play_kind_for_roster_card(
+                    source, family, current_name, final_name
+                ),
+                symbol_id=symbol_id,
+                control=allocated["control"],
+                support=allocated["support"],
+                recon=allocated["recon"],
+                supply=allocated["supply"],
+                command=allocated["command"],
+                mobility=allocated["mobility"],
+                rarity=_rarity_for_value(card_id),
+                plain_role=source.plain_role,
+                catalog_number=number,
             )
         )
     return tuple(cards)
@@ -242,9 +348,7 @@ def build_advanced_catalog() -> tuple[AdvancedCard, ...]:
 
 ADVANCED_CATALOG: tuple[AdvancedCard, ...] = build_advanced_catalog()
 ADVANCED_CATALOG_INDEX = {card.id: card for card in ADVANCED_CATALOG}
-ADVANCED_CARDS: tuple[AdvancedCard, ...] = tuple(
-    card for card in ADVANCED_CATALOG if is_playable_advanced_card(card)
-)
+ADVANCED_CARDS: tuple[AdvancedCard, ...] = load_advanced_roster()
 ADVANCED_CARD_INDEX = {card.id: card for card in ADVANCED_CARDS}
 ADVANCED_SYMBOL_INDEX = {card.symbol_id: card for card in ADVANCED_CATALOG}
 
@@ -395,7 +499,7 @@ def build_balanced_deck(
 ) -> tuple[str, ...]:
     """Build a deterministic deck balanced across available operational domains.
 
-    The default 24-card deck allocates four cards to each of the six domains.
+    It spreads cards across every domain represented in the reviewed roster.
     Within each domain it prefers new card kinds, families and primary
     capabilities, so the result demonstrates the breadth of the advanced pool.
     """
@@ -481,16 +585,20 @@ __all__ = (
     "ADVANCED_CATALOG_INDEX",
     "ADVANCED_CARDS",
     "ADVANCED_CARD_INDEX",
+    "ADVANCED_FAMILY_NAMES",
+    "ADVANCED_ROSTER_PATH",
     "ADVANCED_STARTER_DECK",
     "ADVANCED_SYMBOL_INDEX",
     "AdvancedCard",
     "NUMERIC_CAPABILITY_FIELDS",
     "RARITIES",
+    "allocate_advanced_stats",
     "build_advanced_catalog",
     "build_balanced_deck",
     "get_advanced_card",
     "get_advanced_card_for_symbol",
     "get_advanced_catalog_entry",
     "is_playable_advanced_card",
+    "load_advanced_roster",
     "search_advanced_cards",
 )

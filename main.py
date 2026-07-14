@@ -99,6 +99,8 @@ from simulation_engine import (
     SimulationRuleError,
     SimulationState,
     calculate_simulation_power,
+    card_allowed_in_theater,
+    current_time_of_day,
     new_simulation,
     play_simulation_round,
 )
@@ -574,7 +576,9 @@ def advanced_symbol(card: AdvancedCard, *, classes: str = "simulation-card__symb
 
 
 def advanced_identity_label(card: AdvancedCard) -> str:
-    return f"カード名：{card.name}"
+    catalog_number = getattr(card, "catalog_number", None)
+    number_label = f"No.{catalog_number} " if catalog_number not in (None, "") else ""
+    return f"{number_label}カード名：{card.name}"
 
 
 def primary_card_stats(
@@ -888,7 +892,7 @@ def card_tutorial_tile(tutorial: CardTutorial, player: dict[str, object]) -> Non
 
 @contextmanager
 def page_shell(active: str, eyebrow: str, title: str, subtitle: str) -> Iterator[None]:
-    ui.add_head_html('<link rel="stylesheet" href="/static/styles.css?v=20260713-3">')
+    ui.add_head_html('<link rel="stylesheet" href="/static/styles.css?v=20260714-1">')
     ui.colors(
         primary="#60AFFF",
         secondary="#55C7D9",
@@ -3652,7 +3656,7 @@ def record_simulation_completion(state: SimulationState) -> None:
 def simulation_page() -> None:
     with page_shell(
         "/simulation", "ADVANCED SIMULATION", "本格統合作戦シミュレーション",
-        "基本18枚を集めた後の上級ルールです。180枚の実体カードを使い、12ターンで3作戦域を争います。",
+        f"基本18枚を集めた後の上級ルールです。{len(ADVANCED_CARDS)}枚のカードを使い、12ターンで4作戦域を争います。",
     ):
         player = ensure_player_state(app.storage.user)
         owned_count = len(player["collection"]["owned_cards"])
@@ -3676,9 +3680,9 @@ def simulation_page() -> None:
                 section_heading("開放後に増える要素", "いきなり覚える必要はありません。画面内で意味を説明します。")
                 with ui.element("div").classes("three-grid mt-3"):
                     for title, text, icon in (
-                        ("180枚の実体カード", "部隊・装備・施設だけをカードにし、枠などの表示情報は除外します。", "library_books"),
+                        (f"{len(ADVANCED_CARDS)}枚のカード", "変更後の部隊名・番号・能力値を反映したカードで編制します。", "library_books"),
                         ("12ターン", "通常の9ラウンドより長く、複数の作戦を組み立てます。", "schedule"),
-                        ("統合作戦", "制圧・支援・偵察・補給に、指揮・機動・領域連携が加わります。", "hub"),
+                        ("昼夜と4作戦域", "陸上3域と海上1域を使い、分類連携・航空連携・夜間補正も計算します。", "hub"),
                     ):
                         with ui.element("div").classes("simulation-status"):
                             ui.icon(icon).classes("blue-text")
@@ -3702,9 +3706,24 @@ def simulation_page() -> None:
                 ui.notify("そのカードはすでに使用しました。", type="warning")
                 return
             selection["card"] = card_id
+            selected_theater = selection.get("theater")
+            if selected_theater and not card_allowed_in_theater(
+                get_advanced_card(card_id), selected_theater
+            ):
+                selection["theater"] = None
+                ui.notify("選んだカードを配置できない作戦域だったため、配備先を解除しました。", type="warning")
             simulation_board.refresh()
 
         def select_theater(theater_id: str) -> None:
+            card_id = selection.get("card")
+            if card_id and not card_allowed_in_theater(
+                get_advanced_card(card_id), theater_id
+            ):
+                ui.notify(
+                    "このカードはその作戦域に配置できません。海軍は海上、海上では海軍・空軍だけを使えます。",
+                    type="warning",
+                )
+                return
             selection["theater"] = theater_id
             simulation_board.refresh()
 
@@ -3751,13 +3770,29 @@ def simulation_page() -> None:
             with ui.element("section").classes("simulation-hero"):
                 with ui.column().classes("gap-1 flex-1"):
                     chip("上級ルール", "yellow")
-                    ui.label("3つの作戦域へ、毎ターン1枚を配備").classes("text-2xl font-bold")
+                    ui.label("4つの作戦域へ、毎ターン1枚を配備").classes("text-2xl font-bold")
                     ui.label(
-                        "まずカード、次に作戦域を選びます。相手も同時に1枚を置き、ターンごとに任務点を争います。"
+                        "まずカード、次に配置できる作戦域を選びます。相手も同時に1枚を置き、ターンごとに任務点を争います。"
                     ).classes("section-subtitle")
                 with ui.row().classes("gap-2"):
                     secondary_button("24枚デッキを編集", "/simulation-deck", "tune")
                     secondary_button("最初から", icon="restart_alt", on_click=reset_simulation)
+
+            time_of_day = current_time_of_day(active)
+            is_night = time_of_day == "夜"
+            with ui.element("div").classes(
+                f"simulation-time-banner simulation-time-banner--{'night' if is_night else 'day'}"
+            ):
+                ui.icon("dark_mode" if is_night else "wb_sunny", size="36px")
+                with ui.column().classes("gap-0 flex-1"):
+                    ui.label(f"現在は{time_of_day}です").classes("text-xl font-bold")
+                    ui.label(
+                        "夜間は、航空組織・偵察支援・機甲組織・砲兵組織・防空・対戦車・ミサイル・情報・通信・治安支援の"
+                        "制圧・支援・偵察・機動が各1低下します（0未満にはなりません）。"
+                        if is_night else
+                        "昼間は夜間デバフを受けません。次のターンは夜になり、影響する分類の能力が低下します。"
+                    ).classes("text-sm")
+                chip("夜間補正あり" if is_night else "夜間補正なし", "yellow" if is_night else "green")
 
             with ui.element("div").classes("simulation-status-grid"):
                 with ui.element("div").classes("simulation-status"):
@@ -3797,7 +3832,8 @@ def simulation_page() -> None:
 
             ui.label("作戦域を選ぶ").classes("section-title")
             ui.label(
-                "表示中の敵戦力は偵察済みのカードだけです。『未確認』があれば実際はさらに高い可能性があります。"
+                "陸上3域には海軍を配置できません。海上作戦域は海軍・空軍だけ配置できます。"
+                "表示中の敵戦力は偵察済みカードだけです。『未確認』があれば実際はさらに高い可能性があります。"
             ).classes("section-subtitle")
             with ui.element("div").classes("simulation-theater-grid"):
                 for theater_id in THEATER_IDS:
@@ -3813,10 +3849,24 @@ def simulation_page() -> None:
                         " simulation-theater--selected"
                         if selection.get("theater") == theater_id else ""
                     )
-                    with ui.element("div").classes(f"simulation-theater{selected_class}"):
+                    selected_card = (
+                        get_advanced_card(str(selection["card"]))
+                        if selection.get("card") else None
+                    )
+                    can_deploy = (
+                        selected_card is None
+                        or card_allowed_in_theater(selected_card, theater_id)
+                    )
+                    unavailable_class = " simulation-theater--unavailable" if not can_deploy else ""
+                    with ui.element("div").classes(
+                        f"simulation-theater{selected_class}{unavailable_class}"
+                    ):
                         with ui.row().classes("w-full items-center justify-between"):
                             ui.label(theater.label).classes("font-bold")
                             chip(f"未確認 {hidden_count}" if hidden_count else "偵察済み", "yellow" if hidden_count else "green")
+                        ui.label(
+                            "海軍・空軍のみ配置可能" if theater_id == "naval" else "海軍は配置不可"
+                        ).classes("simulation-theater__rule")
                         with ui.element("div").classes("control-meter"):
                             ui.label(f"味方 {own_power.total}").classes("blue-text")
                             ui.label("現在戦力").classes("muted")
@@ -3835,10 +3885,17 @@ def simulation_page() -> None:
                             f"制圧 {own_power.control} / 有効支援 {own_power.active_support} / "
                             f"補給不足 {own_power.supply_deficit} / 領域連携 +{own_power.domain_bonus}"
                         ).classes("muted text-xs")
-                        ui.button(
-                            "この作戦域を選ぶ", icon="place",
+                        ui.label(
+                            f"分類連携 +{own_power.family_bonus} / 航空連携 +{own_power.aviation_bonus} / "
+                            f"夜間 -{own_power.night_penalty}"
+                        ).classes("simulation-power-bonuses")
+                        theater_button = ui.button(
+                            "このカードは配置不可" if not can_deploy else "この作戦域を選ぶ",
+                            icon="block" if not can_deploy else "place",
                             on_click=lambda tid=theater_id: select_theater(tid),
                         ).props("flat no-caps").classes("card-action")
+                        if not can_deploy:
+                            theater_button.props("disable")
 
             with ui.card().classes("panel simulation-hand"):
                 with ui.row().classes("w-full items-center justify-between gap-3"):
@@ -3889,6 +3946,9 @@ def simulation_page() -> None:
                         ("指揮", "同じ作戦域の指揮合計3ごとに+1。最大+6です。"),
                         ("機動", "同じ作戦域の機動合計5ごとに+1。最大+4です。"),
                         ("領域連携", "陸・海・空宇宙など異なる領域が2種類以上そろうと、追加1領域ごとに+2です。"),
+                        ("分類連携", "同じ分類の2枚目以降は、1枚につき戦力+2。作戦域ごとに最大+6です。"),
+                        ("航空連携", "空母・航空戦艦・航空巡洋艦・空軍・航空管制系の2枚目以降は、1枚につき戦力+2。最大+6です。"),
+                        ("昼と夜", "奇数ターンは昼、偶数ターンは夜です。影響分類は夜に制圧・支援・偵察・機動が各1低下します。"),
                     ):
                         with ui.element("div").classes("simulation-status"):
                             ui.label(title).classes("font-bold blue-text")
@@ -3901,7 +3961,7 @@ def simulation_page() -> None:
 def simulation_deck_page() -> None:
     with page_shell(
         "/simulation", "ADVANCED DECK", "本格シミュレーション用デッキ",
-        "プレイ可能な180枚から12〜24枚を選びます。枠は表示情報としてカードから除外しています。",
+        f"プレイ可能な{len(ADVANCED_CARDS)}枚から12〜24枚を選びます。枠と部隊規模はコレクション専用です。",
     ):
         player = ensure_player_state(app.storage.user)
         if not player["progression"]["simulation_unlocked"]:
@@ -3953,10 +4013,10 @@ def simulation_deck_page() -> None:
 
         with ui.element("section").classes("simulation-hero"):
             with ui.column().classes("gap-1 flex-1"):
-                chip("プレイ可能カード180枚", "green")
+                chip(f"プレイ可能カード{len(ADVANCED_CARDS)}枚", "green")
                 ui.label("実体のある部隊・装備・施設だけを編制").classes("text-2xl font-bold")
                 ui.label(
-                    "枠7種はカードではなく、各カードの記号表示に使用します。"
+                    "変更後の部隊名・番号・自動割り振り能力を反映しています。枠と部隊規模はカードではありません。"
                 ).classes("section-subtitle")
             with ui.row().classes("gap-2"):
                 primary_button("このデッキで新規作戦", icon="play_arrow", on_click=start_selected_simulation)

@@ -372,38 +372,41 @@ class UiRouteTests(unittest.TestCase):
 
     def test_advanced_identity_omits_scales_but_collection_keeps_the_symbol(self) -> None:
         ordinary = main.ADVANCED_CARDS[0]
-        mission_division = main.get_advanced_card("advanced_task_organizations_05")
 
-        self.assertEqual(main.advanced_identity_label(ordinary), f"カード名：{ordinary.name}")
+        self.assertEqual(
+            main.advanced_identity_label(ordinary),
+            f"No.{ordinary.catalog_number} カード名：{ordinary.name}",
+        )
         self.assertFalse(any(card.family in {"frames", "echelon"} for card in main.ADVANCED_CARDS))
         with self.assertRaises(KeyError):
             main.get_advanced_card("advanced_echelon_05")
         self.assertEqual(main.SYMBOL_INDEX["echelon_05"].name, "師団")
-        mission_label = main.advanced_identity_label(mission_division)
-        self.assertEqual(mission_label, f"カード名：{mission_division.name}")
-        self.assertNotIn("部隊規模", mission_label)
+        self.assertNotIn("部隊規模", main.advanced_identity_label(ordinary))
 
     def test_advanced_symbols_use_catalog_frames_as_display_metadata(self) -> None:
-        self.assertEqual(
-            main.advanced_frame_kind(main.get_advanced_card("advanced_infantry_01")),
-            "unit",
-        )
-        self.assertEqual(
-            main.advanced_frame_kind(main.get_advanced_card("advanced_ground_entities_01")),
-            "ground",
-        )
-        self.assertEqual(
-            main.advanced_frame_kind(main.get_advanced_card("advanced_air_space_entities_01")),
-            "air",
-        )
-        self.assertEqual(
-            main.advanced_frame_kind(main.get_advanced_card("advanced_air_space_entities_11")),
-            "space",
-        )
-        self.assertEqual(
-            main.advanced_frame_kind(main.get_advanced_card("advanced_sea_entities_08")),
-            "subsurface",
-        )
+        self.assertTrue(main.ADVANCED_CARDS)
+        self.assertTrue(all(
+            main.advanced_frame_kind(card)
+            in {"unit", "ground", "air", "space", "surface", "subsurface"}
+            for card in main.ADVANCED_CARDS
+        ))
+        stylesheet = (
+            Path(main.__file__).resolve().parent / "static" / "styles.css"
+        ).read_text(encoding="utf-8")
+        for frame in ("ground", "air", "space", "surface", "subsurface"):
+            self.assertIn(f".simulation-card__symbol--{frame}", stylesheet)
+
+    def test_advanced_ui_exposes_four_theaters_and_deployment_limits(self) -> None:
+        self.assertEqual(main.THEATER_IDS, ("north", "central", "south", "naval"))
+        self.assertEqual(main.THEATER_LABELS["naval"], "海上作戦域")
+        naval = next(card for card in main.ADVANCED_CARDS if card.family == "naval_units")
+        aviation = next(card for card in main.ADVANCED_CARDS if card.family == "aviation_units")
+        land = next(card for card in main.ADVANCED_CARDS if card.family == "infantry")
+        self.assertFalse(main.card_allowed_in_theater(naval, "north"))
+        self.assertTrue(main.card_allowed_in_theater(naval, "naval"))
+        self.assertTrue(main.card_allowed_in_theater(aviation, "north"))
+        self.assertTrue(main.card_allowed_in_theater(aviation, "naval"))
+        self.assertFalse(main.card_allowed_in_theater(land, "naval"))
 
     def test_card_detail_dialog_is_created_only_on_first_open(self) -> None:
         card = main.CARDS[0]

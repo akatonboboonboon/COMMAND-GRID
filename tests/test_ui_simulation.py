@@ -106,6 +106,31 @@ class UiSimulationTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(len(stat_labels), expected_card_faces)
                 await asyncio.sleep(0.1)
 
+    async def test_advanced_board_renders_day_and_all_four_theater_rules(self) -> None:
+        player = main.default_player_state()
+        player["progression"]["simulation_unlocked"] = True
+        state = main.new_simulation(main.ADVANCED_STARTER_DECK)
+        with (
+            patch.object(
+                Storage,
+                "_create_persistent_dict",
+                side_effect=lambda _storage_id: PseudoPersistentDict(),
+            ),
+            patch.object(main, "ensure_player_state", return_value=player),
+            patch.object(main, "update_state_mode", return_value=player),
+            patch.object(main, "store_player_state", return_value=player),
+            patch.object(main, "load_or_start_simulation", return_value=state),
+        ):
+            async with user_simulation(root=main.simulation_page) as user:
+                await user.open("/")
+                await user.should_see("現在は昼です")
+                await user.should_see("海上作戦域")
+                await user.should_see("海軍・空軍のみ配置可能")
+                land_restrictions = user.find(content="海軍は配置不可").elements
+                self.assertEqual(len(land_restrictions), 3)
+                await user.should_see("分類連携 +0 / 航空連携 +0 / 夜間 -0")
+                await asyncio.sleep(0.1)
+
     def test_lane_headers_reserve_one_consistent_status_position(self) -> None:
         stylesheet = (
             Path(main.__file__).resolve().parent / "static" / "styles.css"
@@ -117,6 +142,39 @@ class UiSimulationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("flex-direction: column", declarations)
         self.assertIn("align-items: flex-start", declarations)
         self.assertRegex(declarations, r"min-height\s*:\s*\d")
+
+    def test_advanced_board_has_four_desktop_columns_and_mobile_swipe(self) -> None:
+        stylesheet = (
+            Path(main.__file__).resolve().parent / "static" / "styles.css"
+        ).read_text(encoding="utf-8")
+        desktop = re.search(
+            r"\.simulation-theater-grid\s*\{(?P<body>[^}]*)\}", stylesheet
+        )
+
+        self.assertIsNotNone(desktop)
+        self.assertIn(
+            "grid-template-columns: repeat(4, minmax(0, 1fr))",
+            desktop.group("body") if desktop else "",
+        )
+        self.assertIn(".simulation-time-banner--day", stylesheet)
+        self.assertIn(".simulation-time-banner--night", stylesheet)
+        self.assertRegex(
+            stylesheet,
+            r"@media \(max-width: 1180px\)[\s\S]*?\.simulation-theater-grid\s*\{[\s\S]*?display: flex;",
+        )
+
+    def test_advanced_board_explains_time_and_theater_restrictions(self) -> None:
+        source = Path(main.__file__).read_text(encoding="utf-8")
+
+        for text in (
+            "現在は{time_of_day}です",
+            "海軍・空軍のみ配置可能",
+            "海軍は配置不可",
+            "分類連携 +{own_power.family_bonus}",
+            "航空連携 +{own_power.aviation_bonus}",
+            "夜間 -{own_power.night_penalty}",
+        ):
+            self.assertIn(text, source)
 
 
 if __name__ == "__main__":

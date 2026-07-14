@@ -2,12 +2,12 @@
 
 This mode is intentionally separate from the approachable core game.  It uses
 playable unit, equipment, and facility records, twelve turns, and six
-explainable capability axes while retaining the familiar three-theater
-simultaneous-order flow.
+explainable capability axes across three land theaters and one naval theater.
 """
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Mapping, Sequence
@@ -24,12 +24,33 @@ from symbol_catalog import Domain
 
 SIMULATION_ROUNDS = 12
 SIMULATION_DECK_SIZE = 24
-THEATER_IDS: tuple[str, ...] = ("north", "central", "south")
+THEATER_IDS: tuple[str, ...] = ("north", "central", "south", "naval")
 THEATER_LABELS = {
     "north": "北部作戦域",
     "central": "中央作戦域",
     "south": "南部作戦域",
+    "naval": "海上作戦域",
 }
+
+DAY = "昼"
+NIGHT = "夜"
+_NIGHT_PENALTY_FAMILIES = frozenset({
+    "aviation_units",
+    "infantry_support",
+    "armor",
+    "artillery",
+    "air_antiarmor",
+    "information_support",
+})
+_NIGHT_PENALTY_FIELDS = ("control", "support", "recon", "mobility")
+_AVIATION_COORDINATION_KEYWORDS = (
+    "航空母艦",
+    "航空戦艦",
+    "航空巡洋艦",
+    "空軍",
+    "航空管制",
+    "早期警戒管制",
+)
 
 
 class SimulationPhase(StrEnum):
@@ -66,12 +87,69 @@ def _get_playable_card(card_id: str) -> AdvancedCard:
     return card
 
 
-def _deployment_stats(card: AdvancedCard) -> Mapping[str, int]:
-    """Return the card's printed stats without external size modifiers."""
+def time_of_day_for_round(round_no: int) -> str:
+    """Return the deterministic time of day for a round (odd=day, even=night)."""
 
-    return {name: int(getattr(card, name)) for name in (
+    _require(round_no > 0, "invalid_round", "ターン番号は1以上必要です。")
+    return DAY if round_no % 2 else NIGHT
+
+
+def current_time_of_day(state: "SimulationState") -> str:
+    """Return the current round's time of day."""
+
+    return time_of_day_for_round(state.round_no)
+
+
+def card_allowed_in_theater(card: AdvancedCard | str, theater_id: str) -> bool:
+    """Return whether a card may be deployed to a land or naval theater.
+
+    Naval organizations are restricted to the naval theater.  The naval
+    theater accepts naval and aviation organizations only; aviation may also
+    support any of the three land theaters.
+    """
+
+    if theater_id not in THEATER_IDS:
+        return False
+    if isinstance(card, str):
+        try:
+            card = _get_playable_card(card)
+        except SimulationRuleError:
+            return False
+    if theater_id == "naval":
+        return card.family in {"naval_units", "aviation_units"}
+    return card.family != "naval_units"
+
+
+def _deployment_stats(
+    card: AdvancedCard,
+    round_no: int | None = None,
+) -> Mapping[str, int]:
+    """Return printed stats after the deterministic night modifier."""
+
+    stats = {name: int(getattr(card, name)) for name in (
         "control", "support", "recon", "supply", "command", "mobility"
     )}
+    if (
+        round_no is not None
+        and time_of_day_for_round(round_no) == NIGHT
+        and card.family in _NIGHT_PENALTY_FAMILIES
+    ):
+        for name in _NIGHT_PENALTY_FIELDS:
+            stats[name] = max(0, stats[name] - 1)
+    return stats
+
+
+def _night_penalties(card: AdvancedCard, round_no: int) -> dict[str, int]:
+    printed = _deployment_stats(card)
+    adjusted = _deployment_stats(card, round_no)
+    return {
+        name: printed[name] - adjusted[name]
+        for name in _NIGHT_PENALTY_FIELDS
+    }
+
+
+def _is_aviation_coordination_card(card: AdvancedCard) -> bool:
+    return any(keyword in card.name for keyword in _AVIATION_COORDINATION_KEYWORDS)
 
 
 @dataclass(slots=True)
@@ -139,12 +217,21 @@ class SimulationPower:
     support: int = 0
     active_support: int = 0
     recon: int = 0
+    command: int = 0
+    mobility: int = 0
     supply_generated: int = 0
     supply_demand: int = 0
     supply_deficit: int = 0
     command_bonus: int = 0
     mobility_bonus: int = 0
     domain_bonus: int = 0
+    family_bonus: int = 0
+    aviation_bonus: int = 0
+    night_penalty: int = 0
+    night_control_penalty: int = 0
+    night_support_penalty: int = 0
+    night_recon_penalty: int = 0
+    night_mobility_penalty: int = 0
     total: int = 0
 
     def to_dict(self) -> dict[str, int]:
@@ -285,6 +372,15 @@ class SimulationState:
         order = tuple(str(item) for item in value["player_order"])
         _require(len(order) == 2, "invalid_state", "プレイヤーは2人必要です。")
         raw_result = value.get("result")
+        # Saves created before the naval theater existed contain only three
+        # theater records.  Add an empty fourth record before validation.
+        raw_theaters = {
+            str(key): item for key, item in value["theaters"].items()
+        }
+        raw_theaters.setdefault(
+            "naval",
+            SimulationTheater("naval", THEATER_LABELS["naval"]).to_dict(),
+        )
         state = cls(
             game_id=str(value["game_id"]),
             round_no=int(value["round_no"]),
@@ -297,7 +393,7 @@ class SimulationState:
             },
             theaters={
                 str(key): SimulationTheater.from_dict(item)
-                for key, item in value["theaters"].items()
+                for key, item in raw_theaters.items()
             },
             orders={
                 str(key): SimulationOrder.from_dict(item)
@@ -350,7 +446,7 @@ def new_simulation(
             theater_id: SimulationTheater(theater_id, THEATER_LABELS[theater_id])
             for theater_id in THEATER_IDS
         },
-        events=[f"{max_rounds}ターンの統合作戦を開始しました。"],
+        events=[f"{max_rounds}ターンの統合作戦を開始しました。第1ターンは昼です。"],
     )
 
 
@@ -365,7 +461,12 @@ def submit_simulation_order(
     _require(theater_id in state.theaters, "unknown_theater", "存在しない作戦域です。")
     _require(player_id not in state.orders, "order_exists", "命令は確定済みです。")
     _require(card_id in state.players[player_id].hand, "card_not_in_hand", "そのカードは手札にありません。")
-    _get_playable_card(card_id)
+    card = _get_playable_card(card_id)
+    _require(
+        card_allowed_in_theater(card, theater_id),
+        "card_not_allowed",
+        f"{card.name}は{THEATER_LABELS[theater_id]}へ配置できません。",
+    )
     order = SimulationOrder(player_id, card_id, theater_id, state.round_no)
     state.orders[player_id] = order
     if set(state.orders) == set(state.player_order):
@@ -387,43 +488,62 @@ def calculate_simulation_power(
         and (visible_to is None or item.visible_to(visible_to))
     ]
     cards_and_stats: list[tuple[AdvancedCard, Mapping[str, int]]] = []
+    penalty_totals = {name: 0 for name in _NIGHT_PENALTY_FIELDS}
     for item in deployments:
         card = _get_playable_card(item.card_id)
-        cards_and_stats.append((card, _deployment_stats(card)))
+        cards_and_stats.append((card, _deployment_stats(card, state.round_no)))
+        for name, amount in _night_penalties(card, state.round_no).items():
+            penalty_totals[name] += amount
     control = sum(stats["control"] for _, stats in cards_and_stats)
     support = sum(stats["support"] for _, stats in cards_and_stats)
     active_support = support if control > 0 else 0
     recon = sum(stats["recon"] for _, stats in cards_and_stats)
+    command = sum(stats["command"] for _, stats in cards_and_stats)
+    mobility = sum(stats["mobility"] for _, stats in cards_and_stats)
     generated = sum(max(0, stats["supply"]) for _, stats in cards_and_stats)
     demand = sum(abs(min(0, stats["supply"])) for _, stats in cards_and_stats)
     deficit = max(0, demand - generated)
-    command_bonus = min(
-        6, sum(stats["command"] for _, stats in cards_and_stats) // 3
-    )
-    mobility_bonus = min(
-        4, sum(stats["mobility"] for _, stats in cards_and_stats) // 5
-    )
+    command_bonus = min(6, command // 3)
+    mobility_bonus = min(4, mobility // 5)
     domains = {
         card.domain for card, _ in cards_and_stats
         if card.domain not in {Domain.GENERIC}
     }
     domain_bonus = max(0, len(domains) - 1) * 2
+    family_counts = Counter(card.family for card, _ in cards_and_stats)
+    family_bonus = min(
+        6,
+        sum(max(0, count - 1) * 2 for count in family_counts.values()),
+    )
+    aviation_count = sum(
+        _is_aviation_coordination_card(card) for card, _ in cards_and_stats
+    )
+    aviation_bonus = min(6, max(0, aviation_count - 1) * 2)
     total = max(
         0,
         control + active_support + command_bonus + mobility_bonus
-        + domain_bonus - deficit,
+        + domain_bonus + family_bonus + aviation_bonus - deficit,
     )
     return SimulationPower(
         control=control,
         support=support,
         active_support=active_support,
         recon=recon,
+        command=command,
+        mobility=mobility,
         supply_generated=generated,
         supply_demand=demand,
         supply_deficit=deficit,
         command_bonus=command_bonus,
         mobility_bonus=mobility_bonus,
         domain_bonus=domain_bonus,
+        family_bonus=family_bonus,
+        aviation_bonus=aviation_bonus,
+        night_penalty=sum(penalty_totals.values()),
+        night_control_penalty=penalty_totals["control"],
+        night_support_penalty=penalty_totals["support"],
+        night_recon_penalty=penalty_totals["recon"],
+        night_mobility_penalty=penalty_totals["mobility"],
         total=total,
     )
 
@@ -450,8 +570,10 @@ def choose_simulation_ai_order(
     best: tuple[float, int, int, str, str] | None = None
     for card_index, card_id in enumerate(state.players[player_id].hand):
         card = _get_playable_card(card_id)
-        stats = _deployment_stats(card)
+        stats = _deployment_stats(card, state.round_no)
         for theater_index, theater_id in enumerate(THEATER_IDS):
+            if not card_allowed_in_theater(card, theater_id):
+                continue
             own, enemy, own_count, hidden = theater_context[theater_id]
             gap = enemy.total - own.total
             base = stats["control"] + (
@@ -467,9 +589,27 @@ def choose_simulation_ai_order(
             # Encourage two-theater plans and stop wasteful over-stacking.
             spread = 5.0 if own_count == 0 else 2.0 if own_count == 1 else 0.0
             overstack = max(0, own.total - enemy.total - 5) * 1.1 + own_count * 0.7
+            own_cards = [
+                _get_playable_card(item.card_id)
+                for item in state.theaters[theater_id].deployments
+                if item.player_id == player_id
+            ]
+            family_synergy = (
+                2.0
+                if own.family_bonus < 6
+                and any(item.family == card.family for item in own_cards)
+                else 0.0
+            )
+            aviation_synergy = (
+                2.0
+                if own.aviation_bonus < 6
+                and _is_aviation_coordination_card(card)
+                and any(_is_aviation_coordination_card(item) for item in own_cards)
+                else 0.0
+            )
             score = (
                 base + information + supply + command + mobility + contest
-                + spread - overstack
+                + spread + family_synergy + aviation_synergy - overstack
             )
             candidate = (score, -card_index, -theater_index, card_id, theater_id)
             if best is None or candidate > best:
@@ -494,11 +634,17 @@ def _reveal_by_recon(state: SimulationState) -> None:
 
 def resolve_simulation_round(state: SimulationState) -> None:
     _require(state.phase is SimulationPhase.RESOLVING, "wrong_phase", "両者の命令が必要です。")
+    time_of_day = current_time_of_day(state)
     for player_id in state.player_order:
         order = state.orders[player_id]
         player = state.players[player_id]
         _require(order.card_id in player.hand, "card_not_in_hand", "命令カードがありません。")
         card = _get_playable_card(order.card_id)
+        _require(
+            card_allowed_in_theater(card, order.theater_id),
+            "card_not_allowed",
+            f"{card.name}は{THEATER_LABELS[order.theater_id]}へ配置できません。",
+        )
         player.hand.remove(order.card_id)
         state.theaters[order.theater_id].deployments.append(
             SimulationDeployment(
@@ -511,7 +657,7 @@ def resolve_simulation_round(state: SimulationState) -> None:
             )
         )
         state.events.append(
-            f"{state.round_no}T: {player.name}が{card.name}を"
+            f"{state.round_no}T（{time_of_day}）: {player.name}が{card.name}を"
             f"{THEATER_LABELS[order.theater_id]}へ配備。"
         )
     _reveal_by_recon(state)
@@ -609,7 +755,12 @@ def validate_simulation_state(state: SimulationState) -> None:
             "invalid_state",
             "命令カードが手札にありません。",
         )
-        _get_playable_card(order.card_id)
+        card = _get_playable_card(order.card_id)
+        _require(
+            card_allowed_in_theater(card, order.theater_id),
+            "invalid_state",
+            "命令カードを配置できない作戦域です。",
+        )
     for theater_id, theater in state.theaters.items():
         _require(theater.theater_id == theater_id, "invalid_state", "作戦域IDが不正です。")
         for deployment in theater.deployments:
@@ -633,7 +784,12 @@ def validate_simulation_state(state: SimulationState) -> None:
                 "invalid_state",
                 "偵察公開先が不正です。",
             )
-            _get_playable_card(deployment.card_id)
+            card = _get_playable_card(deployment.card_id)
+            _require(
+                card_allowed_in_theater(card, theater_id),
+                "invalid_state",
+                "配備カードを配置できない作戦域です。",
+            )
     if state.phase is SimulationPhase.COMPLETE:
         _require(state.result is not None, "invalid_state", "完了結果がありません。")
 
@@ -643,6 +799,8 @@ __all__ = [
     "SIMULATION_ROUNDS",
     "THEATER_IDS",
     "THEATER_LABELS",
+    "DAY",
+    "NIGHT",
     "SimulationPhase",
     "SimulationDeployment",
     "SimulationPower",
@@ -650,10 +808,13 @@ __all__ = [
     "SimulationRuleError",
     "SimulationState",
     "calculate_simulation_power",
+    "card_allowed_in_theater",
     "choose_simulation_ai_order",
+    "current_time_of_day",
     "new_simulation",
     "play_simulation_round",
     "resolve_simulation_round",
     "submit_simulation_order",
+    "time_of_day_for_round",
     "validate_simulation_state",
 ]
