@@ -894,7 +894,7 @@ def card_tutorial_tile(tutorial: CardTutorial, player: dict[str, object]) -> Non
 
 @contextmanager
 def page_shell(active: str, eyebrow: str, title: str, subtitle: str) -> Iterator[None]:
-    ui.add_head_html('<link rel="stylesheet" href="/static/styles.css?v=20260714-1">')
+    ui.add_head_html('<link rel="stylesheet" href="/static/styles.css?v=20260714-2">')
     ui.colors(
         primary="#60AFFF",
         secondary="#55C7D9",
