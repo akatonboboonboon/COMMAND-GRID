@@ -34,6 +34,7 @@ THEATER_LABELS = {
 
 DAY = "昼"
 NIGHT = "夜"
+BATTLE_TIMES: tuple[str, str] = (DAY, NIGHT)
 _NIGHT_PENALTY_FAMILIES = frozenset({
     "aviation_units",
     "infantry_support",
@@ -87,17 +88,34 @@ def _get_playable_card(card_id: str) -> AdvancedCard:
     return card
 
 
-def time_of_day_for_round(round_no: int) -> str:
-    """Return the deterministic time of day for a round (odd=day, even=night)."""
+def _validate_battle_time(battle_time: str) -> str:
+    """Return a valid match-wide battle time or raise a rule error."""
+
+    _require(
+        battle_time in BATTLE_TIMES,
+        "invalid_battle_time",
+        "戦場の時間帯は「昼」または「夜」を選んでください。",
+    )
+    return battle_time
+
+
+def time_of_day_for_round(round_no: int, battle_time: str = DAY) -> str:
+    """Return the match-wide time for a round.
+
+    ``round_no`` remains in this public helper for backward compatibility, but
+    time no longer alternates between turns.  Callers may pass the selected
+    match time as the second argument; legacy one-argument calls resolve to the
+    daytime default used when old saves are migrated.
+    """
 
     _require(round_no > 0, "invalid_round", "ターン番号は1以上必要です。")
-    return DAY if round_no % 2 else NIGHT
+    return _validate_battle_time(battle_time)
 
 
 def current_time_of_day(state: "SimulationState") -> str:
-    """Return the current round's time of day."""
+    """Return the fixed time selected for this match."""
 
-    return time_of_day_for_round(state.round_no)
+    return time_of_day_for_round(state.round_no, state.battle_time)
 
 
 def card_allowed_in_theater(card: AdvancedCard | str, theater_id: str) -> bool:
@@ -122,16 +140,15 @@ def card_allowed_in_theater(card: AdvancedCard | str, theater_id: str) -> bool:
 
 def _deployment_stats(
     card: AdvancedCard,
-    round_no: int | None = None,
+    battle_time: str = DAY,
 ) -> Mapping[str, int]:
-    """Return printed stats after the deterministic night modifier."""
+    """Return printed stats after the match-wide night modifier."""
 
     stats = {name: int(getattr(card, name)) for name in (
         "control", "support", "recon", "supply", "command", "mobility"
     )}
     if (
-        round_no is not None
-        and time_of_day_for_round(round_no) == NIGHT
+        _validate_battle_time(battle_time) == NIGHT
         and card.family in _NIGHT_PENALTY_FAMILIES
     ):
         for name in _NIGHT_PENALTY_FIELDS:
@@ -139,9 +156,9 @@ def _deployment_stats(
     return stats
 
 
-def _night_penalties(card: AdvancedCard, round_no: int) -> dict[str, int]:
+def _night_penalties(card: AdvancedCard, battle_time: str) -> dict[str, int]:
     printed = _deployment_stats(card)
-    adjusted = _deployment_stats(card, round_no)
+    adjusted = _deployment_stats(card, battle_time)
     return {
         name: printed[name] - adjusted[name]
         for name in _NIGHT_PENALTY_FIELDS
@@ -349,6 +366,7 @@ class SimulationState:
     player_order: tuple[str, str]
     players: dict[str, SimulationPlayer]
     theaters: dict[str, SimulationTheater]
+    battle_time: str = DAY
     orders: dict[str, SimulationOrder] = field(default_factory=dict)
     events: list[str] = field(default_factory=list)
     result: SimulationResult | None = None
@@ -362,6 +380,7 @@ class SimulationState:
             "player_order": list(self.player_order),
             "players": {key: value.to_dict() for key, value in self.players.items()},
             "theaters": {key: value.to_dict() for key, value in self.theaters.items()},
+            "battle_time": self.battle_time,
             "orders": {key: value.to_dict() for key, value in self.orders.items()},
             "events": list(self.events),
             "result": None if self.result is None else self.result.to_dict(),
@@ -395,6 +414,8 @@ class SimulationState:
                 str(key): SimulationTheater.from_dict(item)
                 for key, item in raw_theaters.items()
             },
+            # Saves created before match-wide time selection are daytime games.
+            battle_time=str(value.get("battle_time", DAY)),
             orders={
                 str(key): SimulationOrder.from_dict(item)
                 for key, item in value.get("orders", {}).items()
@@ -427,9 +448,11 @@ def new_simulation(
     opponent_name: str = "統合作戦AI",
     game_id: str | None = None,
     max_rounds: int = SIMULATION_ROUNDS,
+    battle_time: str = DAY,
 ) -> SimulationState:
     _require(max_rounds > 0, "invalid_rounds", "ターン数は1以上必要です。")
     _require(player_id != opponent_id, "duplicate_player", "プレイヤーIDは別々にします。")
+    battle_time = _validate_battle_time(battle_time)
     first = _validate_deck(player_deck, max_rounds)
     second = _validate_deck(opponent_deck or player_deck, max_rounds)
     return SimulationState(
@@ -446,7 +469,11 @@ def new_simulation(
             theater_id: SimulationTheater(theater_id, THEATER_LABELS[theater_id])
             for theater_id in THEATER_IDS
         },
-        events=[f"{max_rounds}ターンの統合作戦を開始しました。第1ターンは昼です。"],
+        battle_time=battle_time,
+        events=[
+            f"{max_rounds}ターンの統合作戦を開始しました。"
+            f"戦場条件は{battle_time}戦（全ターン{battle_time}）です。"
+        ],
     )
 
 
@@ -491,8 +518,8 @@ def calculate_simulation_power(
     penalty_totals = {name: 0 for name in _NIGHT_PENALTY_FIELDS}
     for item in deployments:
         card = _get_playable_card(item.card_id)
-        cards_and_stats.append((card, _deployment_stats(card, state.round_no)))
-        for name, amount in _night_penalties(card, state.round_no).items():
+        cards_and_stats.append((card, _deployment_stats(card, state.battle_time)))
+        for name, amount in _night_penalties(card, state.battle_time).items():
             penalty_totals[name] += amount
     control = sum(stats["control"] for _, stats in cards_and_stats)
     support = sum(stats["support"] for _, stats in cards_and_stats)
@@ -570,7 +597,7 @@ def choose_simulation_ai_order(
     best: tuple[float, int, int, str, str] | None = None
     for card_index, card_id in enumerate(state.players[player_id].hand):
         card = _get_playable_card(card_id)
-        stats = _deployment_stats(card, state.round_no)
+        stats = _deployment_stats(card, state.battle_time)
         for theater_index, theater_id in enumerate(THEATER_IDS):
             if not card_allowed_in_theater(card, theater_id):
                 continue
@@ -724,7 +751,12 @@ def _simulation_result(state: SimulationState) -> SimulationResult:
     else:
         winner = None
         reason = "確保作戦域・任務点とも同数"
-    summary = "引き分けです。" if winner is None else f"{state.players[winner].name}が{reason}で勝利しました。"
+    outcome = (
+        "引き分けです。"
+        if winner is None
+        else f"{state.players[winner].name}が{reason}で勝利しました。"
+    )
+    summary = f"{state.battle_time}戦: {outcome}"
     return SimulationResult(
         winner_id=winner,
         theaters_controlled=controlled,
@@ -738,6 +770,7 @@ def _simulation_result(state: SimulationState) -> SimulationResult:
 
 
 def validate_simulation_state(state: SimulationState) -> None:
+    _validate_battle_time(state.battle_time)
     _require(set(state.players) == set(state.player_order), "invalid_state", "プレイヤー構成が不正です。")
     _require(set(state.theaters) == set(THEATER_IDS), "invalid_state", "作戦域構成が不正です。")
     _require(1 <= state.round_no <= state.max_rounds, "invalid_state", "ターン番号が不正です。")
@@ -795,6 +828,7 @@ def validate_simulation_state(state: SimulationState) -> None:
 
 
 __all__ = [
+    "BATTLE_TIMES",
     "SIMULATION_DECK_SIZE",
     "SIMULATION_ROUNDS",
     "THEATER_IDS",

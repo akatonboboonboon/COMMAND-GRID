@@ -7,6 +7,9 @@ from advanced_game_data import (
     get_advanced_card,
 )
 from simulation_engine import (
+    BATTLE_TIMES,
+    DAY,
+    NIGHT,
     SIMULATION_ROUNDS,
     THEATER_IDS,
     THEATER_LABELS,
@@ -46,6 +49,8 @@ class SimulationEngineTests(unittest.TestCase):
     def test_new_simulation_uses_24_card_catalog_deck_and_round_trips(self) -> None:
         state = new_simulation()
         self.assertEqual(state.max_rounds, 12)
+        self.assertEqual(state.battle_time, DAY)
+        self.assertEqual(BATTLE_TIMES, (DAY, NIGHT))
         self.assertEqual(len(state.players["player"].hand), 24)
         payload = json.loads(json.dumps(state.to_dict(), ensure_ascii=False))
         restored = SimulationState.from_dict(payload)
@@ -210,10 +215,12 @@ class SimulationEngineTests(unittest.TestCase):
         state = new_simulation()
         payload = state.to_dict()
         payload["theaters"].pop("naval")
+        payload.pop("battle_time")
         restored = SimulationState.from_dict(payload)
         self.assertEqual(set(restored.theaters), set(THEATER_IDS))
         self.assertEqual(restored.theaters["naval"].label, "海上作戦域")
         self.assertEqual(restored.theaters["naval"].deployments, [])
+        self.assertEqual(restored.battle_time, DAY)
 
     def test_validation_rejects_a_card_in_a_forbidden_theater(self) -> None:
         naval = self._card_in_family("naval_units")
@@ -224,12 +231,14 @@ class SimulationEngineTests(unittest.TestCase):
         with self.assertRaises(SimulationRuleError):
             validate_simulation_state(state)
 
-    def test_day_and_night_alternate_and_all_designated_families_are_penalized(self) -> None:
-        self.assertEqual(time_of_day_for_round(1), "昼")
-        self.assertEqual(time_of_day_for_round(2), "夜")
-        self.assertEqual(time_of_day_for_round(3), "昼")
+    def test_battle_time_is_fixed_and_all_designated_families_are_penalized_at_night(self) -> None:
+        self.assertEqual(time_of_day_for_round(1), DAY)
+        self.assertEqual(time_of_day_for_round(2), DAY)
+        self.assertEqual(time_of_day_for_round(3, NIGHT), NIGHT)
         with self.assertRaises(SimulationRuleError):
             time_of_day_for_round(0)
+        with self.assertRaises(SimulationRuleError):
+            time_of_day_for_round(1, "夕方")
 
         affected_families = (
             "aviation_units",
@@ -245,8 +254,8 @@ class SimulationEngineTests(unittest.TestCase):
                 state = new_simulation(
                     self._deck_with(card, size=2),
                     max_rounds=2,
+                    battle_time=NIGHT,
                 )
-                state.round_no = 2
                 state.theaters["central"].deployments.append(
                     SimulationDeployment(
                         f"night:{family}", "player", card.id, "central", 1, ["player"]
@@ -272,8 +281,11 @@ class SimulationEngineTests(unittest.TestCase):
                 )
 
         unaffected = self._card_in_family("infantry")
-        state = new_simulation(self._deck_with(unaffected, size=2), max_rounds=2)
-        state.round_no = 2
+        state = new_simulation(
+            self._deck_with(unaffected, size=2),
+            max_rounds=2,
+            battle_time=NIGHT,
+        )
         state.theaters["central"].deployments.append(
             SimulationDeployment(
                 "night:unaffected", "player", unaffected.id, "central", 1, ["player"]
@@ -286,6 +298,20 @@ class SimulationEngineTests(unittest.TestCase):
         self.assertEqual(power.recon, unaffected.recon)
         self.assertEqual(power.mobility, unaffected.mobility)
         self.assertEqual(power.command, unaffected.command)
+
+    def test_invalid_battle_time_is_rejected_on_creation_loading_and_validation(self) -> None:
+        with self.assertRaisesRegex(SimulationRuleError, "昼.*夜"):
+            new_simulation(battle_time="夕方")
+
+        payload = new_simulation().to_dict()
+        payload["battle_time"] = "夕方"
+        with self.assertRaisesRegex(SimulationRuleError, "昼.*夜"):
+            SimulationState.from_dict(payload)
+
+        state = new_simulation()
+        state.battle_time = "夕方"
+        with self.assertRaisesRegex(SimulationRuleError, "昼.*夜"):
+            validate_simulation_state(state)
 
     def test_family_and_aviation_coordination_bonuses_are_capped(self) -> None:
         family_cards = [
@@ -362,30 +388,36 @@ class SimulationEngineTests(unittest.TestCase):
         land_order = choose_simulation_ai_order(land_state, "opponent")
         self.assertIn(land_order.theater_id, {"north", "central", "south"})
 
-    def test_four_theaters_score_and_events_record_day_and_night(self) -> None:
+    def test_four_theaters_score_and_events_keep_the_selected_night_for_the_whole_match(self) -> None:
         aviation_cards = [
             card for card in ADVANCED_CARDS if card.family == "aviation_units"
         ][:2]
         state = new_simulation(
             [card.id for card in aviation_cards],
             max_rounds=2,
+            battle_time=NIGHT,
         )
-        self.assertEqual(current_time_of_day(state), "昼")
+        self.assertEqual(current_time_of_day(state), NIGHT)
         submit_simulation_order(state, "player", aviation_cards[0].id, "north")
         submit_simulation_order(state, "opponent", aviation_cards[0].id, "naval")
         resolve_simulation_round(state)
         self.assertEqual(state.players["player"].mission_points, 1)
         self.assertEqual(state.players["opponent"].mission_points, 1)
-        self.assertTrue(any("（昼）" in event for event in state.events))
+        self.assertTrue(any("全ターン夜" in event for event in state.events))
+        self.assertTrue(any("夜戦" in event for event in state.events))
+        self.assertTrue(any("（夜）" in event for event in state.events))
+        self.assertFalse(any("（昼）" in event for event in state.events))
         self.assertTrue(all(len(theater.round_winners) == 1 for theater in state.theaters.values()))
 
-        self.assertEqual(current_time_of_day(state), "夜")
+        self.assertEqual(current_time_of_day(state), NIGHT)
         submit_simulation_order(state, "player", aviation_cards[1].id, "central")
         submit_simulation_order(state, "opponent", aviation_cards[1].id, "south")
         resolve_simulation_round(state)
         self.assertTrue(any("（夜）" in event for event in state.events))
+        self.assertFalse(any("（昼）" in event for event in state.events))
         self.assertTrue(all(len(theater.round_winners) == 2 for theater in state.theaters.values()))
         self.assertIsNotNone(state.result)
+        self.assertIn("夜戦", state.result.summary)
         self.assertLessEqual(max(state.result.theaters_controlled.values()), 4)
 
     def test_full_twelve_turn_match_completes_with_a_result(self) -> None:

@@ -2148,6 +2148,61 @@ body.cg-patterns-off .hero-main::after {
   box-shadow: inset 4px 0 0 #b9c5ff;
 }
 
+.simulation-setup {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  width: 100%;
+  padding: clamp(22px, 4vw, 38px);
+  background: linear-gradient(145deg, #102b44 0%, #0a1a29 100%);
+  border: 1px solid #3975a7;
+  border-radius: 12px;
+}
+
+.simulation-setup__intro {
+  max-width: 760px;
+}
+
+.simulation-time-choice-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  width: 100%;
+}
+
+.simulation-time-choice {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 250px;
+  padding: clamp(18px, 3vw, 28px);
+  border: 2px solid;
+  border-radius: 10px;
+}
+
+.simulation-time-choice--day {
+  color: #fff4c2;
+  background: linear-gradient(135deg, #624415 0%, #263341 100%);
+  border-color: #f6bf4a;
+}
+
+.simulation-time-choice--night {
+  color: #e5ebff;
+  background: linear-gradient(135deg, #161f4b 0%, #11192c 100%);
+  border-color: #8297ff;
+}
+
+.simulation-time-choice__body {
+  flex: 1 1 auto;
+  line-height: 1.75;
+}
+
+.simulation-time-choice__button {
+  width: 100%;
+  min-height: 48px;
+  margin-top: auto;
+}
+
 .simulation-board {
   display: flex;
   flex-direction: column;
@@ -2787,6 +2842,20 @@ body.cg-patterns-off .hero-main::after {
 
   .simulation-hero {
     padding: 20px 17px;
+  }
+
+  .simulation-setup {
+    gap: 16px;
+    padding: 20px 17px;
+  }
+
+  .simulation-time-choice-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .simulation-time-choice {
+    min-height: 225px;
+    padding: 18px;
   }
 
   .simulation-status-grid {

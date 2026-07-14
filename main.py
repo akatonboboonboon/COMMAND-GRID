@@ -93,6 +93,8 @@ from player_state import (
 )
 from game_engine import MAX_ROUNDS, Phase, RuleViolation, calculate_lane_power
 from simulation_engine import (
+    DAY,
+    NIGHT,
     THEATER_IDS,
     THEATER_LABELS,
     SimulationPhase,
@@ -3591,7 +3593,11 @@ def battle_page() -> None:
         battle_board()
 
 
-def start_fresh_simulation(player: dict[str, object] | None = None) -> SimulationState:
+def start_fresh_simulation(
+    player: dict[str, object] | None = None,
+    *,
+    battle_time: str = DAY,
+) -> SimulationState:
     """Create and persist a fresh advanced match for the current browser."""
 
     current = player or ensure_player_state(app.storage.user)
@@ -3601,6 +3607,7 @@ def start_fresh_simulation(player: dict[str, object] | None = None) -> Simulatio
     state = new_simulation(
         deck,
         player_name=str(current["profile"]["display_name"]),
+        battle_time=battle_time,
     )
     app.storage.user[SIMULATION_MATCH_STORAGE_KEY] = state.to_dict()
     app.storage.user.pop(SIMULATION_RECORDED_STORAGE_KEY, None)
@@ -3608,14 +3615,24 @@ def start_fresh_simulation(player: dict[str, object] | None = None) -> Simulatio
     return state
 
 
-def load_or_start_simulation(player: dict[str, object]) -> SimulationState:
+def load_saved_simulation() -> SimulationState | None:
+    """Load an existing advanced match without silently starting a new one."""
+
     raw = app.storage.user.get(SIMULATION_MATCH_STORAGE_KEY)
     if isinstance(raw, dict):
         try:
             return SimulationState.from_dict(raw)
         except (KeyError, TypeError, ValueError, SimulationRuleError):
-            pass
-    return start_fresh_simulation(player)
+            app.storage.user.pop(SIMULATION_MATCH_STORAGE_KEY, None)
+    return None
+
+
+def clear_saved_simulation() -> None:
+    """Return the advanced mode to its pre-match time selection screen."""
+
+    app.storage.user.pop(SIMULATION_MATCH_STORAGE_KEY, None)
+    app.storage.user.pop(SIMULATION_RECORDED_STORAGE_KEY, None)
+    app.storage.user.pop(SIMULATION_REWARDS_STORAGE_KEY, None)
 
 
 def save_simulation(state: SimulationState) -> None:
@@ -3682,7 +3699,7 @@ def simulation_page() -> None:
                     for title, text, icon in (
                         (f"{len(ADVANCED_CARDS)}枚のカード", "変更後の部隊名・番号・能力値を反映したカードで編制します。", "library_books"),
                         ("12ターン", "通常の9ラウンドより長く、複数の作戦を組み立てます。", "schedule"),
-                        ("昼夜と4作戦域", "陸上3域と海上1域を使い、分類連携・航空連携・夜間補正も計算します。", "hub"),
+                        ("昼戦・夜戦と4作戦域", "開始前に昼か夜を選び、陸上3域と海上1域で12ターン戦います。", "hub"),
                     ):
                         with ui.element("div").classes("simulation-status"):
                             ui.icon(icon).classes("blue-text")
@@ -3692,14 +3709,32 @@ def simulation_page() -> None:
 
         player = update_state_mode(player, "simulation")
         player = store_player_state(app.storage.user, player)
-        state = load_or_start_simulation(player)
         selection: dict[str, str | None] = {
             "card": None,
             "theater": None,
         }
 
+        def start_simulation_with_time(battle_time: str) -> None:
+            try:
+                start_fresh_simulation(
+                    ensure_player_state(app.storage.user),
+                    battle_time=battle_time,
+                )
+            except SimulationRuleError as error:
+                ui.notify(str(error), type="negative")
+                return
+            selection.update(card=None, theater=None)
+            simulation_board.refresh()
+            ui.notify(
+                f"{battle_time}戦の12ターン作戦を開始しました。",
+                type="positive",
+            )
+
         def select_simulation_card(card_id: str) -> None:
-            active = load_or_start_simulation(ensure_player_state(app.storage.user))
+            active = load_saved_simulation()
+            if active is None:
+                ui.notify("先に昼戦か夜戦を選んでください。", type="warning")
+                return
             if active.phase is SimulationPhase.COMPLETE:
                 return
             if card_id not in active.players["player"].hand:
@@ -3733,7 +3768,10 @@ def simulation_page() -> None:
             if not card_id or not theater_id:
                 ui.notify("カードと配備先の作戦域を選んでください。", type="warning")
                 return
-            active = load_or_start_simulation(ensure_player_state(app.storage.user))
+            active = load_saved_simulation()
+            if active is None:
+                ui.notify("先に昼戦か夜戦を選んでください。", type="warning")
+                return
             try:
                 play_simulation_round(
                     active,
@@ -3754,14 +3792,62 @@ def simulation_page() -> None:
             simulation_board.refresh()
 
         def reset_simulation() -> None:
-            start_fresh_simulation(ensure_player_state(app.storage.user))
+            clear_saved_simulation()
             selection.update(card=None, theater=None)
             simulation_board.refresh()
-            ui.notify("新しい12ターン作戦を開始しました。", type="positive")
+            ui.notify("昼戦か夜戦を選んで、新しい作戦を開始してください。", type="info")
 
         @ui.refreshable
         def simulation_board() -> None:
-            active = load_or_start_simulation(ensure_player_state(app.storage.user))
+            active = load_saved_simulation()
+            if active is None:
+                with ui.element("section").classes("simulation-setup"):
+                    with ui.column().classes("gap-2 simulation-setup__intro"):
+                        chip("作戦開始前", "yellow")
+                        ui.label("戦闘の時間帯を選ぶ").classes("text-3xl font-bold")
+                        ui.label(
+                            "昼戦か夜戦のどちらかを選びます。選んだ時間帯は全12ターン固定で、"
+                            "途中で昼夜は切り替わりません。"
+                        ).classes("section-subtitle")
+                    with ui.element("div").classes("simulation-time-choice-grid"):
+                        with ui.element("article").classes(
+                            "simulation-time-choice simulation-time-choice--day"
+                        ):
+                            ui.icon("wb_sunny", size="40px")
+                            ui.label("昼戦").classes("text-2xl font-bold")
+                            ui.label(
+                                "夜間補正はありません。すべてのカードを表示どおりの能力で使えます。"
+                            ).classes("text-sm simulation-time-choice__body")
+                            primary_button(
+                                "昼戦で開始",
+                                icon="play_arrow",
+                                on_click=lambda: start_simulation_with_time(DAY),
+                            ).classes("simulation-time-choice__button")
+                        with ui.element("article").classes(
+                            "simulation-time-choice simulation-time-choice--night"
+                        ):
+                            ui.icon("dark_mode", size="40px")
+                            ui.label("夜戦").classes("text-2xl font-bold")
+                            ui.label(
+                                "航空組織・偵察支援・機甲組織・砲兵組織・防空・対戦車・ミサイル・"
+                                "情報・通信・治安支援は、制圧・支援・偵察・機動がそれぞれ1低下します。"
+                            ).classes("text-sm simulation-time-choice__body")
+                            primary_button(
+                                "夜戦で開始",
+                                icon="play_arrow",
+                                on_click=lambda: start_simulation_with_time(NIGHT),
+                            ).classes("simulation-time-choice__button")
+                with ui.card().classes("panel"):
+                    section_heading(
+                        "選択の目安",
+                        "最初はカードの数値がそのまま反映される昼戦がおすすめです。"
+                    )
+                    ui.label(
+                        "夜戦は影響を受けない歩兵組織・特殊作戦組織・工兵組織・後方支援組織・海軍組織などを"
+                        "どう活用するかが重要になります。"
+                    ).classes("section-subtitle mt-2")
+                    secondary_button("24枚デッキを確認", "/simulation-deck", "tune").classes("mt-3")
+                return
             if active.phase is SimulationPhase.COMPLETE:
                 record_simulation_completion(active)
             human = active.players["player"]
@@ -3776,23 +3862,25 @@ def simulation_page() -> None:
                     ).classes("section-subtitle")
                 with ui.row().classes("gap-2"):
                     secondary_button("24枚デッキを編集", "/simulation-deck", "tune")
-                    secondary_button("最初から", icon="restart_alt", on_click=reset_simulation)
+                    secondary_button("時間帯を選び直す", icon="restart_alt", on_click=reset_simulation)
 
             time_of_day = current_time_of_day(active)
-            is_night = time_of_day == "夜"
+            is_night = time_of_day == NIGHT
             with ui.element("div").classes(
                 f"simulation-time-banner simulation-time-banner--{'night' if is_night else 'day'}"
             ):
                 ui.icon("dark_mode" if is_night else "wb_sunny", size="36px")
                 with ui.column().classes("gap-0 flex-1"):
-                    ui.label(f"現在は{time_of_day}です").classes("text-xl font-bold")
+                    ui.label(
+                        f"この試合は{time_of_day}戦です（全12ターン固定）"
+                    ).classes("text-xl font-bold")
                     ui.label(
                         "夜間は、航空組織・偵察支援・機甲組織・砲兵組織・防空・対戦車・ミサイル・情報・通信・治安支援の"
                         "制圧・支援・偵察・機動が各1低下します（0未満にはなりません）。"
                         if is_night else
-                        "昼間は夜間デバフを受けません。次のターンは夜になり、影響する分類の能力が低下します。"
+                        "この試合は全ターン昼戦です。夜間デバフは発生しません。"
                     ).classes("text-sm")
-                chip("夜間補正あり" if is_night else "夜間補正なし", "yellow" if is_night else "green")
+                chip("全ターン夜戦" if is_night else "全ターン昼戦", "yellow" if is_night else "green")
 
             with ui.element("div").classes("simulation-status-grid"):
                 with ui.element("div").classes("simulation-status"):
@@ -3825,7 +3913,7 @@ def simulation_page() -> None:
                             f"コレクション報酬：アカウントアイコン用の記号 {len(rewards['symbols'])}種類"
                         ).classes("text-sm yellow-text")
                     with ui.row().classes("gap-2 mt-4"):
-                        primary_button("新しい作戦", icon="replay", on_click=reset_simulation)
+                        primary_button("次の作戦を選ぶ", icon="replay", on_click=reset_simulation)
                         secondary_button("戦績を見る", "/profile", "military_tech")
                         secondary_button("通常の18枚ルール", "/lobby", "style")
                 return
@@ -3948,7 +4036,7 @@ def simulation_page() -> None:
                         ("領域連携", "陸・海・空宇宙など異なる領域が2種類以上そろうと、追加1領域ごとに+2です。"),
                         ("分類連携", "同じ分類の2枚目以降は、1枚につき戦力+2。作戦域ごとに最大+6です。"),
                         ("航空連携", "空母・航空戦艦・航空巡洋艦・空軍・航空管制系の2枚目以降は、1枚につき戦力+2。最大+6です。"),
-                        ("昼と夜", "奇数ターンは昼、偶数ターンは夜です。影響分類は夜に制圧・支援・偵察・機動が各1低下します。"),
+                        ("昼戦と夜戦", "試合前にどちらかを選び、全12ターン固定で戦います。夜戦の影響分類は制圧・支援・偵察・機動が各1低下します。"),
                     ):
                         with ui.element("div").classes("simulation-status"):
                             ui.label(title).classes("font-bold blue-text")
@@ -4008,7 +4096,7 @@ def simulation_deck_page() -> None:
             ui.notify("領域を均等にした公式24枚へ戻しました。", type="positive")
 
         def start_selected_simulation() -> None:
-            start_fresh_simulation(ensure_player_state(app.storage.user))
+            clear_saved_simulation()
             go("/simulation")
 
         with ui.element("section").classes("simulation-hero"):
@@ -4019,7 +4107,7 @@ def simulation_deck_page() -> None:
                     "変更後の部隊名・番号・自動割り振り能力を反映しています。枠と部隊規模はカードではありません。"
                 ).classes("section-subtitle")
             with ui.row().classes("gap-2"):
-                primary_button("このデッキで新規作戦", icon="play_arrow", on_click=start_selected_simulation)
+                primary_button("時間帯を選んで新規作戦", icon="play_arrow", on_click=start_selected_simulation)
                 secondary_button("公式24枚へ戻す", icon="restart_alt", on_click=reset_advanced_deck)
 
         @ui.refreshable

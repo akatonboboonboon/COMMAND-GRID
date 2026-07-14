@@ -106,10 +106,9 @@ class UiSimulationTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(len(stat_labels), expected_card_faces)
                 await asyncio.sleep(0.1)
 
-    async def test_advanced_board_renders_day_and_all_four_theater_rules(self) -> None:
+    async def test_advanced_setup_requires_day_or_night_before_creating_board(self) -> None:
         player = main.default_player_state()
         player["progression"]["simulation_unlocked"] = True
-        state = main.new_simulation(main.ADVANCED_STARTER_DECK)
         with (
             patch.object(
                 Storage,
@@ -119,16 +118,103 @@ class UiSimulationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "ensure_player_state", return_value=player),
             patch.object(main, "update_state_mode", return_value=player),
             patch.object(main, "store_player_state", return_value=player),
-            patch.object(main, "load_or_start_simulation", return_value=state),
+            patch.object(main, "load_saved_simulation", return_value=None),
         ):
             async with user_simulation(root=main.simulation_page) as user:
                 await user.open("/")
-                await user.should_see("現在は昼です")
+                await user.should_see("戦闘の時間帯を選ぶ")
+                await user.should_see("昼戦で開始")
+                await user.should_see("夜戦で開始")
+                await user.should_see("選んだ時間帯は全12ターン固定")
+                await user.should_not_see("海上作戦域")
+                await asyncio.sleep(0.1)
+
+    async def test_selecting_night_starts_one_fixed_night_match(self) -> None:
+        player = main.default_player_state()
+        player["progression"]["simulation_unlocked"] = True
+        active: dict[str, object] = {"state": None, "calls": []}
+
+        def start_match(
+            _player: dict[str, object] | None = None,
+            *,
+            battle_time: str = main.DAY,
+        ) -> object:
+            active["calls"].append(battle_time)  # type: ignore[union-attr]
+            active["state"] = main.new_simulation(
+                main.ADVANCED_STARTER_DECK,
+                battle_time=battle_time,
+            )
+            return active["state"]
+
+        with (
+            patch.object(
+                Storage,
+                "_create_persistent_dict",
+                side_effect=lambda _storage_id: PseudoPersistentDict(),
+            ),
+            patch.object(main, "ensure_player_state", return_value=player),
+            patch.object(main, "update_state_mode", return_value=player),
+            patch.object(main, "store_player_state", return_value=player),
+            patch.object(main, "load_saved_simulation", side_effect=lambda: active["state"]),
+            patch.object(main, "start_fresh_simulation", side_effect=start_match),
+        ):
+            async with user_simulation(root=main.simulation_page) as user:
+                await user.open("/")
+                user.find("夜戦で開始").click()
+                await user.should_see("この試合は夜戦です（全12ターン固定）")
+                await asyncio.sleep(0.1)
+
+        self.assertEqual(active["calls"], [main.NIGHT])
+        state = active["state"]
+        self.assertIsNotNone(state)
+        self.assertEqual(state.battle_time, main.NIGHT)  # type: ignore[union-attr]
+
+    async def test_advanced_board_renders_fixed_day_and_all_four_theater_rules(self) -> None:
+        player = main.default_player_state()
+        player["progression"]["simulation_unlocked"] = True
+        state = main.new_simulation(main.ADVANCED_STARTER_DECK, battle_time=main.DAY)
+        with (
+            patch.object(
+                Storage,
+                "_create_persistent_dict",
+                side_effect=lambda _storage_id: PseudoPersistentDict(),
+            ),
+            patch.object(main, "ensure_player_state", return_value=player),
+            patch.object(main, "update_state_mode", return_value=player),
+            patch.object(main, "store_player_state", return_value=player),
+            patch.object(main, "load_saved_simulation", return_value=state),
+        ):
+            async with user_simulation(root=main.simulation_page) as user:
+                await user.open("/")
+                await user.should_see("この試合は昼戦です（全12ターン固定）")
+                await user.should_see("夜間デバフは発生しません")
                 await user.should_see("海上作戦域")
                 await user.should_see("海軍・空軍のみ配置可能")
                 land_restrictions = user.find(content="海軍は配置不可").elements
                 self.assertEqual(len(land_restrictions), 3)
                 await user.should_see("分類連携 +0 / 航空連携 +0 / 夜間 -0")
+                await asyncio.sleep(0.1)
+
+    async def test_advanced_board_explains_fixed_night_penalties(self) -> None:
+        player = main.default_player_state()
+        player["progression"]["simulation_unlocked"] = True
+        state = main.new_simulation(main.ADVANCED_STARTER_DECK, battle_time=main.NIGHT)
+        with (
+            patch.object(
+                Storage,
+                "_create_persistent_dict",
+                side_effect=lambda _storage_id: PseudoPersistentDict(),
+            ),
+            patch.object(main, "ensure_player_state", return_value=player),
+            patch.object(main, "update_state_mode", return_value=player),
+            patch.object(main, "store_player_state", return_value=player),
+            patch.object(main, "load_saved_simulation", return_value=state),
+        ):
+            async with user_simulation(root=main.simulation_page) as user:
+                await user.open("/")
+                await user.should_see("この試合は夜戦です（全12ターン固定）")
+                await user.should_see("制圧・支援・偵察・機動が各1低下")
+                await user.should_see("全ターン夜戦")
                 await asyncio.sleep(0.1)
 
     def test_lane_headers_reserve_one_consistent_status_position(self) -> None:
@@ -158,16 +244,22 @@ class UiSimulationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn(".simulation-time-banner--day", stylesheet)
         self.assertIn(".simulation-time-banner--night", stylesheet)
+        self.assertIn(".simulation-time-choice--day", stylesheet)
+        self.assertIn(".simulation-time-choice--night", stylesheet)
         self.assertRegex(
             stylesheet,
             r"@media \(max-width: 1180px\)[\s\S]*?\.simulation-theater-grid\s*\{[\s\S]*?display: flex;",
+        )
+        self.assertRegex(
+            stylesheet,
+            r"@media \(max-width: 760px\)[\s\S]*?\.simulation-time-choice-grid\s*\{[\s\S]*?grid-template-columns: 1fr;",
         )
 
     def test_advanced_board_explains_time_and_theater_restrictions(self) -> None:
         source = Path(main.__file__).read_text(encoding="utf-8")
 
         for text in (
-            "現在は{time_of_day}です",
+            "この試合は{time_of_day}戦です（全12ターン固定）",
             "海軍・空軍のみ配置可能",
             "海軍は配置不可",
             "分類連携 +{own_power.family_bonus}",
@@ -175,6 +267,8 @@ class UiSimulationTests(unittest.IsolatedAsyncioTestCase):
             "夜間 -{own_power.night_penalty}",
         ):
             self.assertIn(text, source)
+        self.assertNotIn("奇数ターンは昼", source)
+        self.assertNotIn("次のターンは夜", source)
 
 
 if __name__ == "__main__":
