@@ -1,3 +1,4 @@
+import inspect
 import unittest
 import tempfile
 from pathlib import Path
@@ -368,7 +369,14 @@ class UiRouteTests(unittest.TestCase):
             main.unit_identity_values(card),
             (("部隊名", card.name), ("兵科", "歩兵")),
         )
-        self.assertEqual(card.name, "第1歩兵")
+        self.assertEqual(card.name, "歩兵中隊")
+
+    def test_symbol_library_source_shows_reviewed_card_names(self) -> None:
+        source = inspect.getsource(main.symbols_page)
+
+        self.assertIn("記号名：", source)
+        self.assertIn("カード名：", source)
+        self.assertIn("playable_cards_by_symbol", source)
 
     def test_advanced_identity_omits_scales_but_collection_keeps_the_symbol(self) -> None:
         ordinary = main.ADVANCED_CARDS[0]

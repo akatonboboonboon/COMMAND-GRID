@@ -356,7 +356,7 @@ class GameEngineTests(unittest.TestCase):
             for item in state.events
             if item.kind == "own_card_deployed" and item.player_id == "p1"
         )
-        self.assertIn("第1歩兵", event.message)
+        self.assertIn("歩兵中隊", event.message)
         self.assertNotIn("部隊規模", event.message)
 
         payload = state.to_dict()

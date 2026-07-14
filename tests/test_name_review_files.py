@@ -93,6 +93,20 @@ class NameReviewFileTests(unittest.TestCase):
                     self.assertGreaterEqual(value, lower)
                     self.assertLessEqual(value, 6)
 
+    def test_normal_rows_apply_every_reviewed_changed_name(self) -> None:
+        rows = [
+            row
+            for row in read_csv(CARD_NAMES_PATH)
+            if row["カタログ"].startswith("通常")
+        ]
+        cards = {card.id: card for card in CARDS}
+
+        for row in rows:
+            with self.subTest(card=row["カードID"]):
+                changed_name = row["変更後の部隊・カード名"].strip()
+                self.assertTrue(changed_name)
+                self.assertEqual(cards[row["カードID"]].name, changed_name)
+
     def test_name_file_has_the_canonical_thirteen_column_schema(self) -> None:
         with CARD_NAMES_PATH.open(encoding="utf-8-sig", newline="") as file:
             rows = list(csv.reader(file))

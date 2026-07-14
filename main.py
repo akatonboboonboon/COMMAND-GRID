@@ -1426,7 +1426,7 @@ def basic_tutorial_page() -> None:
         with ui.element("div").classes("tutorial-lane-grid mt-3"):
             for lane_name, content, owner in (
                 ("左戦線", "配備なし", ""),
-                ("中央戦線", "部隊名：第1歩兵", "あなた"),
+                ("中央戦線", "部隊名：歩兵中隊", "あなた"),
                 ("右戦線", "未確認部隊", "相手"),
             ):
                 with ui.element("div").classes("tutorial-lane tutorial-lane--revealed"):
@@ -2229,6 +2229,9 @@ def symbols_page() -> None:
     ):
         player = ensure_player_state(app.storage.user)
         unlocked_symbols = set(player["collection"]["unlocked_symbols"])
+        playable_cards_by_symbol: dict[str, list[AdvancedCard]] = {}
+        for card in ADVANCED_CARDS:
+            playable_cards_by_symbol.setdefault(card.symbol_id, []).append(card)
         with ui.element("div").classes("beginner-callout beginner-callout--yellow"):
             with ui.row().classes("items-center justify-between gap-4 w-full"):
                 with ui.column().classes("gap-1"):
@@ -2288,13 +2291,22 @@ def symbols_page() -> None:
                             chip(STAGE_LABELS[family.unlock_stage], "yellow")
                 ui.separator().classes("bg-blue-grey-8 my-4")
                 ui.label("収録している記号").classes("font-bold")
-                ui.label("各記号には、カード・支援・施設・装備・編制のいずれかの用途を割り当てています。").classes("section-subtitle")
+                ui.label(
+                    "記号名は参考画像の名称です。本格シミュレーションで使える記号には、添付CSVの変更後カード名も併記します。"
+                ).classes("section-subtitle")
                 with ui.element("div").classes("symbol-mini-grid mt-4"):
                     for symbol in symbols:
+                        playable_cards = playable_cards_by_symbol.get(symbol.id, [])
                         with ui.element("div").classes("symbol-mini-row"):
                             ui.label(symbol.token).classes("symbol-mini-token")
                             with ui.column().classes("gap-0 min-w-0"):
-                                ui.label(symbol.name).classes("font-bold text-sm")
+                                ui.label(f"記号名：{symbol.name}").classes("font-bold text-sm")
+                                if playable_cards:
+                                    ui.label(
+                                        "カード名：" + " / ".join(card.name for card in playable_cards)
+                                    ).classes("text-xs text-blue-2")
+                                else:
+                                    ui.label("本格対戦ではコレクション専用").classes("muted text-xs")
                                 ui.label(symbol.play_kind.value).classes("muted text-xs")
                             if symbol.id == current_selected:
                                 chip("使用中", "yellow")

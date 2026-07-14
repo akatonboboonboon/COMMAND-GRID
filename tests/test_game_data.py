@@ -27,28 +27,29 @@ class GameDataTests(unittest.TestCase):
             with self.subTest(card=card.id):
                 self.assertTrue(card.game_text.strip())
 
-    def test_card_names_do_not_duplicate_formation_scale(self) -> None:
-        expected_scale_free_names = {
-            "infantry_1": "第1歩兵",
-            "infantry_3": "空中機動歩兵",
-            "armor_1": "第4機甲",
-            "recon_1": "前方偵察",
-            "recon_3": "電子偵察",
-            "artillery_1": "野戦砲兵",
-            "engineer_1": "第2工兵",
-            "logistics_1": "前線補給",
+    def test_card_names_match_the_reviewed_changes(self) -> None:
+        expected_names = {
+            "infantry_1": "歩兵中隊",
+            "infantry_2": "市街地警備中隊",
+            "infantry_3": "ヘリボーン中隊",
+            "armor_1": "機械化装甲中隊",
+            "armor_2": "機械化歩兵中隊",
+            "armor_3": "重機械化装甲中隊",
+            "recon_1": "高機動偵察小隊",
+            "recon_2": "無人偵察小隊",
+            "recon_3": "電子偵察小隊",
+            "artillery_1": "自動車化野戦砲中隊",
+            "artillery_2": "自走砲小隊",
+            "artillery_3": "自動車化ロケット砲中隊",
+            "engineer_1": "工兵中隊",
+            "engineer_2": "架橋工兵中隊",
+            "engineer_3": "建築工兵中隊",
+            "logistics_1": "野戦補給中隊",
+            "logistics_2": "野戦整備中隊",
+            "logistics_3": "戦域輸送中隊",
         }
-        formal_scale_suffixes = (
-            "総軍", "軍集団", "軍団", "軍", "師団", "旅団", "連隊",
-            "大隊", "中隊", "小隊", "分隊", "班",
-        )
 
-        for card_id, expected_name in expected_scale_free_names.items():
-            with self.subTest(card=card_id):
-                self.assertEqual(get_card(card_id).name, expected_name)
-        for card in CARDS:
-            with self.subTest(card=card.id):
-                self.assertFalse(card.name.endswith(formal_scale_suffixes))
+        self.assertEqual({card.id: card.name for card in CARDS}, expected_names)
 
     def test_echelon_is_collection_metadata_without_a_gameplay_api(self) -> None:
         reference_echelons = {"班", "分隊", "小隊", "中隊", "大隊"}
