@@ -106,6 +106,55 @@ class UiSimulationTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(len(stat_labels), expected_card_faces)
                 await asyncio.sleep(0.1)
 
+    async def test_deck_mode_switcher_shows_both_independent_saved_counts(self) -> None:
+        player = main.default_player_state()
+        player["deck"] = list(main.STARTER_DECK[:7])
+        player["progression"]["advanced_deck"] = list(main.ADVANCED_STARTER_DECK[:17])
+        player["progression"]["simulation_unlocked"] = True
+
+        with (
+            patch.object(
+                Storage,
+                "_create_persistent_dict",
+                side_effect=lambda _storage_id: PseudoPersistentDict(),
+            ),
+            patch.object(main, "ensure_player_state", return_value=player),
+        ):
+            async with user_simulation(
+                root=lambda: main.deck_mode_switcher("beginner")
+            ) as user:
+                await user.open("/")
+                await user.should_see("初心者演習用デッキ")
+                await user.should_see("本格シミュレーション用デッキ")
+                await user.should_see("現在 7 / 12枚 ・ 最低6枚")
+                await user.should_see("現在 17 / 24枚 ・ 最低12枚")
+                await user.should_see("編集中")
+                await user.should_see(
+                    "2種類は別々に保存されます。片方を変更しても、もう片方の編成は変わりません。"
+                )
+                await asyncio.sleep(0.1)
+
+    def test_deck_pages_select_their_own_slots_and_stack_on_mobile(self) -> None:
+        source = Path(main.__file__).read_text(encoding="utf-8")
+        stylesheet = (
+            Path(main.__file__).resolve().parent / "static" / "styles.css"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('deck_mode_switcher("beginner")', source)
+        self.assertIn('deck_mode_switcher("advanced")', source)
+        self.assertIn('state = update_state_deck(state, new_deck)', source)
+        self.assertIn('current = update_state_advanced_deck(current, selected)', source)
+        desktop = re.search(r"\.deck-mode-grid\s*\{(?P<body>[^}]*)\}", stylesheet)
+        self.assertIsNotNone(desktop)
+        self.assertIn(
+            "grid-template-columns: repeat(2, minmax(0, 1fr))",
+            desktop.group("body") if desktop else "",
+        )
+        self.assertRegex(
+            stylesheet,
+            r"@media \(max-width: 760px\)[\s\S]*?\.deck-mode-grid,[\s\S]*?grid-template-columns: 1fr;",
+        )
+
     async def test_advanced_setup_requires_day_or_night_before_creating_board(self) -> None:
         player = main.default_player_state()
         player["progression"]["simulation_unlocked"] = True

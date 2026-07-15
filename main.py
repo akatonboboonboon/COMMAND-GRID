@@ -517,6 +517,75 @@ def secondary_button(label: str, path: str | None = None, icon: str | None = Non
     return ui.button(label, icon=icon, on_click=handler).props("no-caps flat").classes("secondary-button")
 
 
+def deck_mode_switcher(active_mode: str) -> None:
+    """Show the two independently saved deck slots and their current counts."""
+
+    player = ensure_player_state(app.storage.user)
+    beginner_count = len(player["deck"])
+    advanced_count = len(player["progression"]["advanced_deck"])
+    simulation_unlocked = bool(player["progression"]["simulation_unlocked"])
+    modes = (
+        (
+            "beginner",
+            "初心者演習用デッキ",
+            "初心者演習・通常対戦の18枚ルールで使います。",
+            beginner_count,
+            12,
+            6,
+            "/deck",
+            "school",
+            True,
+        ),
+        (
+            "advanced",
+            "本格シミュレーション用デッキ",
+            f"本格シミュレーションの{len(ADVANCED_CARDS)}枚ルールだけで使います。",
+            advanced_count,
+            24,
+            12,
+            "/simulation-deck",
+            "hub",
+            simulation_unlocked,
+        ),
+    )
+
+    with ui.element("section").classes("deck-mode-switch"):
+        with ui.row().classes("w-full items-start justify-between gap-4"):
+            with ui.column().classes("gap-1"):
+                ui.label("編集するデッキを選ぶ").classes("section-title")
+                ui.label(
+                    "2種類は別々に保存されます。片方を変更しても、もう片方の編成は変わりません。"
+                ).classes("section-subtitle")
+            chip("独立保存", "green")
+        with ui.element("div").classes("deck-mode-grid"):
+            for mode, title, description, count, maximum, minimum, path, icon, unlocked in modes:
+                is_active = mode == active_mode
+                option = ui.button(on_click=lambda destination=path: go(destination)).props(
+                    "flat no-caps"
+                ).classes(
+                    "deck-mode-option"
+                    + (" deck-mode-option--active" if is_active else "")
+                    + (" deck-mode-option--locked" if not unlocked else "")
+                )
+                if is_active:
+                    option.props("aria-current=page")
+                with option:
+                    with ui.row().classes("w-full items-center gap-2 no-wrap"):
+                        ui.icon(icon, size="28px").classes("deck-mode-option__icon")
+                        ui.label(title).classes("deck-mode-option__title")
+                        ui.space()
+                        if is_active and unlocked:
+                            chip("編集中", "green")
+                        elif is_active:
+                            chip("表示中", "yellow")
+                        elif not unlocked:
+                            chip("未開放", "yellow")
+                    ui.label(description).classes("deck-mode-option__description")
+                    ui.label(
+                        f"現在 {count} / {maximum}枚 ・ 最低{minimum}枚"
+                    ).classes("deck-mode-option__count")
+
+
 def unit_symbol(card: UnitCard, size: str = "md") -> None:
     with ui.element("div").classes(f"unit-symbol unit-symbol--{size}").props(
         f'role="img" aria-label="部隊名：{card.name}・兵科：{card.branch}の記号"'
@@ -894,7 +963,7 @@ def card_tutorial_tile(tutorial: CardTutorial, player: dict[str, object]) -> Non
 
 @contextmanager
 def page_shell(active: str, eyebrow: str, title: str, subtitle: str) -> Iterator[None]:
-    ui.add_head_html('<link rel="stylesheet" href="/static/styles.css?v=20260714-2">')
+    ui.add_head_html('<link rel="stylesheet" href="/static/styles.css?v=20260715-1">')
     ui.colors(
         primary="#60AFFF",
         secondary="#55C7D9",
@@ -2408,11 +2477,17 @@ def advanced_cards_page() -> None:
 @ui.page("/deck")
 def deck_page() -> None:
     with page_shell(
-        "/deck", "FORCE BUILDER", "デッキ編成",
-        "役割の違うカードを組み合わせて、自分の部隊を作ります。実際の軍隊編制ではなくゲーム用の構成です。",
+        "/deck", "BEGINNER DECK", "初心者演習用デッキ",
+        "基本18枚から6〜12枚を選びます。本格シミュレーション用デッキとは別に保存されます。",
     ):
         initial_player = ensure_player_state(app.storage.user)
         unlocked_deck_count = len(initial_player["tutorials"]["unlocked_official_decks"])
+
+        @ui.refreshable
+        def deck_mode_summary() -> None:
+            deck_mode_switcher("beginner")
+
+        deck_mode_summary()
         with ui.element("div").classes("beginner-callout"):
             with ui.row().classes("w-full items-center justify-between gap-4"):
                 with ui.column().classes("gap-1"):
@@ -2428,6 +2503,7 @@ def deck_page() -> None:
                 ui.notify(str(error), type="negative")
                 return
             store_player_state(app.storage.user, state)
+            deck_mode_summary.refresh()
             deck_view.refresh()
             if message:
                 ui.notify(message, type="positive")
@@ -2454,7 +2530,7 @@ def deck_page() -> None:
             if len(deck) < 6:
                 ui.notify(f"対戦にはカードを{MAX_ROUNDS}枚以上入れてください。", type="warning")
                 return
-            ui.notify("このデッキを使用します。", type="positive")
+            ui.notify("初心者演習用デッキを使用します。", type="positive")
             go("/lobby")
 
         @ui.refreshable
@@ -2495,11 +2571,11 @@ def deck_page() -> None:
                     with ui.card().classes("panel"):
                         with ui.row().classes("w-full items-start justify-between"):
                             with ui.column().classes("gap-0"):
-                                ui.label("はじめての統合部隊").classes("section-title")
+                                ui.label("初心者演習用デッキ").classes("section-title")
                                 ui.label(
                                     f"現在選択中 {analysis['count']} / 12枚"
                                 ).classes("section-subtitle")
-                            chip("使用中", "green")
+                            chip("初心者演習用", "green")
                         ui.linear_progress(value=min(1, analysis["count"] / 12)).props("rounded size=8px").classes("progress-track mt-3")
                         with ui.column().classes("w-full gap-2 mt-4"):
                             for label, key in (
@@ -2516,7 +2592,7 @@ def deck_page() -> None:
                         for tip in analysis["tips"]:
                             ui.label(tip).classes("deck-tip")
                         with ui.row().classes("gap-2 mt-3"):
-                            primary_button("このデッキで遊ぶ", icon="play_arrow", on_click=use_current_deck)
+                            primary_button("このデッキで初心者演習へ", icon="play_arrow", on_click=use_current_deck)
                             secondary_button(
                                 "元に戻す", icon="restart_alt",
                                 on_click=lambda: update_deck(list(STARTER_DECK), "スターターデッキに戻しました。"),
@@ -2553,7 +2629,9 @@ def lobby_page() -> None:
         "/lobby", "PLAY", "何をするか一つ選ぶ",
         "初めてなら演習がおすすめです。勝敗や時間を気にせず操作を試せます。",
     ):
-        if not ensure_player_state(app.storage.user)["tutorials"]["basic_completed"]:
+        lobby_player = ensure_player_state(app.storage.user)
+        beginner_deck_count = len(lobby_player["deck"])
+        if not lobby_player["tutorials"]["basic_completed"]:
             with ui.element("div").classes("beginner-callout beginner-callout--yellow"):
                 with ui.row().classes("w-full items-center justify-between gap-4"):
                     with ui.column().classes("gap-1"):
@@ -2583,10 +2661,10 @@ def lobby_page() -> None:
                     "演習を始める", icon="play_arrow", on_click=lambda: choose_mode("training"),
                 ).classes("start-here__button")
             with ui.card().classes("panel panel--compact"):
-                ui.label("使用デッキ").classes("muted text-xs")
-                ui.label("はじめての統合部隊").classes("font-bold")
-                ui.label("6つの基本的な仕事が入っています").classes("section-subtitle")
-                secondary_button("デッキを確認", "/deck", "view_carousel").classes("mt-2")
+                ui.label("初心者演習で使うデッキ").classes("muted text-xs")
+                ui.label("初心者演習用デッキ").classes("font-bold")
+                ui.label(f"現在 {beginner_deck_count} / 12枚・最低6枚").classes("section-subtitle")
+                secondary_button("初心者用デッキを確認", "/deck", "view_carousel").classes("mt-2")
 
         with ui.expansion("ほかの遊び方", icon="unfold_more").classes("details-expansion"):
             with ui.element("div").classes("three-grid mt-3"):
@@ -2612,6 +2690,9 @@ def advanced_lobby_page() -> None:
         "/lobby", "MATCH CONTROL", "対戦の準備",
         "遊ぶモードとデッキを選びます。最初は時間制限のない演習がおすすめです。",
     ):
+        lobby_player = ensure_player_state(app.storage.user)
+        beginner_deck_count = len(lobby_player["deck"])
+
         def select_mode(mode: str) -> None:
             if mode == "training":
                 begin_training()
@@ -2644,15 +2725,15 @@ def advanced_lobby_page() -> None:
 
         with ui.element("div").classes("content-grid"):
             with ui.card().classes("panel"):
-                section_heading("使用デッキ", "現在選択中のデッキです。")
+                section_heading("使用デッキ", "初心者演習と通常の18枚ルールで共通して使います。")
                 with ui.row().classes("w-full items-center justify-between gap-4 mt-3"):
                     with ui.column().classes("gap-1"):
                         with ui.row().classes("items-center gap-2"):
-                            ui.label("はじめての統合部隊").classes("text-xl font-bold")
-                            chip("かんたん", "green")
-                        ui.label("得意：守備と支援　/　苦手：すばやい突破").classes("section-subtitle")
-                        ui.label("12 / 12枚・補給バランス 良好").classes("mono text-xs blue-text")
-                    secondary_button("デッキを確認", "/deck", "view_carousel")
+                            ui.label("初心者演習・通常対戦用デッキ").classes("text-xl font-bold")
+                            chip("18枚ルール", "green")
+                        ui.label("本格シミュレーション用デッキとは別に保存されます。").classes("section-subtitle")
+                        ui.label(f"現在 {beginner_deck_count} / 12枚・最低6枚").classes("mono text-xs blue-text")
+                    secondary_button("初心者用デッキを確認", "/deck", "view_carousel")
                 ui.separator().classes("bg-blue-grey-8 my-4")
                 with ui.row().classes("gap-3"):
                     primary_button(
@@ -3858,7 +3939,11 @@ def simulation_page() -> None:
                         "夜戦は影響を受けない歩兵組織・特殊作戦組織・工兵組織・後方支援組織・海軍組織などを"
                         "どう活用するかが重要になります。"
                     ).classes("section-subtitle mt-2")
-                    secondary_button("24枚デッキを確認", "/simulation-deck", "tune").classes("mt-3")
+                    secondary_button(
+                        f"本格用デッキを確認（{len(player['progression']['advanced_deck'])} / 24枚）",
+                        "/simulation-deck",
+                        "tune",
+                    ).classes("mt-3")
                 return
             if active.phase is SimulationPhase.COMPLETE:
                 record_simulation_completion(active)
@@ -4060,10 +4145,16 @@ def simulation_page() -> None:
 @ui.page("/simulation-deck")
 def simulation_deck_page() -> None:
     with page_shell(
-        "/simulation", "ADVANCED DECK", "本格シミュレーション用デッキ",
-        f"プレイ可能な{len(ADVANCED_CARDS)}枚から12〜24枚を選びます。枠と部隊規模はコレクション専用です。",
+        "/deck", "ADVANCED DECK", "本格シミュレーション用デッキ",
+        f"プレイ可能な{len(ADVANCED_CARDS)}枚から12〜24枚を選びます。初心者演習用デッキとは別に保存されます。",
     ):
         player = ensure_player_state(app.storage.user)
+
+        @ui.refreshable
+        def deck_mode_summary() -> None:
+            deck_mode_switcher("advanced")
+
+        deck_mode_summary()
         if not player["progression"]["simulation_unlocked"]:
             with ui.card().classes("panel"):
                 ui.label("このデッキ編集は基本18枚を集めると開放されます。").classes("text-xl font-bold")
@@ -4095,6 +4186,7 @@ def simulation_deck_page() -> None:
                 ui.notify(str(error), type="negative")
                 return
             store_player_state(app.storage.user, current)
+            deck_mode_summary.refresh()
             selected_deck.refresh()
             advanced_catalog.refresh()
 
@@ -4103,6 +4195,7 @@ def simulation_deck_page() -> None:
                 ensure_player_state(app.storage.user), ADVANCED_STARTER_DECK
             )
             store_player_state(app.storage.user, current)
+            deck_mode_summary.refresh()
             selected_deck.refresh()
             advanced_catalog.refresh()
             ui.notify("領域を均等にした公式24枚へ戻しました。", type="positive")

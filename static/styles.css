@@ -895,6 +895,95 @@ a:focus-visible {
   align-items: start;
 }
 
+.deck-mode-switch {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 100%;
+  padding: 18px;
+  background: #0b1b2a;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.deck-mode-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  width: 100%;
+}
+
+.deck-mode-option {
+  width: 100%;
+  min-height: 132px;
+  padding: 16px !important;
+  color: var(--text) !important;
+  background: #102538 !important;
+  border: 1px solid var(--line) !important;
+  border-radius: 8px !important;
+  box-shadow: none !important;
+  text-align: left;
+}
+
+.deck-mode-option:hover {
+  background: #153048 !important;
+  border-color: #527493 !important;
+}
+
+.deck-mode-option:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--blue) 55%, transparent);
+  outline-offset: 2px;
+}
+
+.deck-mode-option .q-btn__content {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  align-items: stretch;
+  justify-content: flex-start;
+  width: 100%;
+}
+
+.deck-mode-option--active {
+  background: #12334d !important;
+  border-color: var(--blue) !important;
+  box-shadow: inset 4px 0 0 var(--blue) !important;
+}
+
+.deck-mode-option--locked:not(.deck-mode-option--active) {
+  background: #101d29 !important;
+}
+
+.deck-mode-option__icon {
+  flex: 0 0 auto;
+  color: var(--blue);
+}
+
+.deck-mode-option__title {
+  min-width: 0;
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 800;
+  line-height: 1.35;
+  text-align: left;
+}
+
+.deck-mode-option__description {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+  text-align: left;
+  white-space: normal;
+}
+
+.deck-mode-option__count {
+  color: var(--blue);
+  font-family: Consolas, "Roboto Mono", monospace;
+  font-size: 12px;
+  font-weight: 750;
+  text-align: left;
+}
+
 .deck-list {
   max-height: 850px;
   overflow: auto;
@@ -2574,6 +2663,7 @@ body.cg-patterns-off .hero-main::after {
 
   .metric-grid,
   .three-grid,
+  .deck-mode-grid,
   .role-grid,
   .filter-bar,
   .lane-grid,
@@ -2581,6 +2671,14 @@ body.cg-patterns-off .hero-main::after {
   .symbol-mini-grid,
   .locked-tutorial-grid {
     grid-template-columns: 1fr;
+  }
+
+  .deck-mode-switch {
+    padding: 15px;
+  }
+
+  .deck-mode-option {
+    min-height: 120px;
   }
 
   .filter-bar,
