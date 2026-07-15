@@ -12,6 +12,7 @@ from nicegui.storage import Storage
 from nicegui.testing import user_simulation
 
 import main
+from player_state import unlock_collection
 
 
 class UiSimulationTests(unittest.IsolatedAsyncioTestCase):
@@ -126,8 +127,9 @@ class UiSimulationTests(unittest.IsolatedAsyncioTestCase):
                 await user.open("/")
                 await user.should_see("初心者演習用デッキ")
                 await user.should_see("本格シミュレーション用デッキ")
-                await user.should_see("現在 7 / 12枚 ・ 最低6枚")
-                await user.should_see("現在 17 / 24枚 ・ 最低12枚")
+                await user.should_see("現在 7 / 12枚")
+                await user.should_see("現在 17 / 24枚")
+                await user.should_not_see("最低")
                 await user.should_see("編集中")
                 await user.should_see(
                     "2種類は別々に保存されます。片方を変更しても、もう片方の編成は変わりません。"
@@ -144,6 +146,9 @@ class UiSimulationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('deck_mode_switcher("advanced")', source)
         self.assertIn('state = update_state_deck(state, new_deck)', source)
         self.assertIn('current = update_state_advanced_deck(current, selected)', source)
+        self.assertIn('update_deck([], "デッキを空にしました。', source)
+        self.assertIn("def clear_advanced_deck()", source)
+        self.assertNotIn("12枚未満にはできません", source)
         desktop = re.search(r"\.deck-mode-grid\s*\{(?P<body>[^}]*)\}", stylesheet)
         self.assertIsNotNone(desktop)
         self.assertIn(
@@ -155,9 +160,158 @@ class UiSimulationTests(unittest.IsolatedAsyncioTestCase):
             r"@media \(max-width: 760px\)[\s\S]*?\.deck-mode-grid,[\s\S]*?grid-template-columns: 1fr;",
         )
 
+    async def test_beginner_lobby_shows_nine_card_start_requirement(self) -> None:
+        player = main.default_player_state()
+        player["deck"] = []
+
+        with (
+            patch.object(
+                Storage,
+                "_create_persistent_dict",
+                side_effect=lambda _storage_id: PseudoPersistentDict(),
+            ),
+            patch.object(main, "ensure_player_state", return_value=player),
+        ):
+            async with user_simulation(root=main.lobby_page) as user:
+                await user.open("/")
+                await user.should_see("現在 0 / 12枚")
+                await user.should_see("試合開始には9枚必要です")
+                await user.should_see("試合開始まであと9枚")
+                start_buttons = user.find(content="演習を始める").elements
+                self.assertTrue(start_buttons)
+                self.assertTrue(
+                    all("disable" in button._props for button in start_buttons)  # pylint: disable=protected-access
+                )
+                await asyncio.sleep(0.1)
+
+    async def test_beginner_deck_can_be_cleared_to_zero(self) -> None:
+        with patch.object(
+            Storage,
+            "_create_persistent_dict",
+            side_effect=lambda _storage_id: PseudoPersistentDict(),
+        ):
+            async with user_simulation(root=main.deck_page) as user:
+                await user.open("/")
+                user.find("すべて外して0枚から編制").click()
+                await user.should_see("現在選択中 0 / 12枚")
+                await user.should_see("カードがありません")
+                await asyncio.sleep(0.1)
+
+    async def test_existing_training_match_resumes_after_current_deck_is_cleared(self) -> None:
+        player = main.default_player_state()
+        player["deck"] = []
+        existing_match = object()
+
+        with (
+            patch.object(
+                Storage,
+                "_create_persistent_dict",
+                side_effect=lambda _storage_id: PseudoPersistentDict(),
+            ),
+            patch.object(main, "poll_multiplayer", return_value={"status": "idle"}),
+            patch.object(main, "ensure_player_state", return_value=player),
+            patch.object(main, "load_match", return_value=existing_match),
+            patch.object(main, "store_player_state", return_value=player),
+            patch.object(main, "start_match", return_value=existing_match) as start_match,
+            patch.object(main, "restart_match") as restart_match,
+            patch.object(main, "go") as go,
+        ):
+            async with user_simulation(
+                root=lambda: main.begin_training(reset=False)
+            ) as user:
+                await user.open("/")
+                await asyncio.sleep(0.1)
+
+        start_match.assert_called_once()
+        restart_match.assert_not_called()
+        go.assert_called_once_with("/battle")
+
+    async def test_online_waiting_session_survives_clearing_current_deck(self) -> None:
+        player = main.default_player_state()
+        player["deck"] = []
+        player["selected_mode"] = "casual"
+        waiting = {"status": "waiting", "queue_position": 1}
+
+        with (
+            patch.object(
+                Storage,
+                "_create_persistent_dict",
+                side_effect=lambda _storage_id: PseudoPersistentDict(),
+            ),
+            patch.object(main, "ensure_player_state", return_value=player),
+            patch.object(main, "poll_multiplayer", return_value=waiting),
+            patch.object(main, "join_queue") as join_queue,
+            patch.object(main, "abandon_match"),
+            patch.object(main, "register_client_poll"),
+        ):
+            async with user_simulation(root=main.online_queue_page) as user:
+                await user.open("/")
+                await user.should_see("対戦相手を待っています")
+                await user.should_see("待機順 1")
+                await asyncio.sleep(0.1)
+
+        join_queue.assert_not_called()
+
+    async def test_friend_waiting_session_survives_clearing_current_deck(self) -> None:
+        player = main.default_player_state()
+        player["deck"] = []
+        player["selected_mode"] = "friend"
+        waiting = {"status": "waiting_friend", "room_code": "A7K2PX"}
+
+        with (
+            patch.object(
+                Storage,
+                "_create_persistent_dict",
+                side_effect=lambda _storage_id: PseudoPersistentDict(),
+            ),
+            patch.object(main, "ensure_player_state", return_value=player),
+            patch.object(main, "poll_multiplayer", return_value=waiting),
+            patch.object(main, "abandon_match"),
+            patch.object(main, "register_client_poll"),
+        ):
+            async with user_simulation(root=main.friend_room_page) as user:
+                await user.open("/")
+                await user.should_see("A7K2PX")
+                await user.should_see("参加を待っています（1 / 2）")
+                await asyncio.sleep(0.1)
+
+    async def test_advanced_deck_can_be_cleared_and_saved_at_zero(self) -> None:
+        player = unlock_collection(
+            main.default_player_state(), cards=[card.id for card in main.CARDS]
+        )
+        holder = {"player": player}
+
+        def store_state(_storage: object, state: dict[str, object]) -> dict[str, object]:
+            holder["player"] = state
+            return state
+
+        with (
+            patch.object(
+                Storage,
+                "_create_persistent_dict",
+                side_effect=lambda _storage_id: PseudoPersistentDict(),
+            ),
+            patch.object(
+                main,
+                "ensure_player_state",
+                side_effect=lambda _storage: holder["player"],
+            ),
+            patch.object(main, "store_player_state", side_effect=store_state),
+        ):
+            async with user_simulation(root=main.simulation_deck_page) as user:
+                await user.open("/")
+                user.find("すべて外して0枚から編制").click()
+                await user.should_see("選択中 0 / 24枚")
+                await asyncio.sleep(0.1)
+
+        self.assertEqual(holder["player"]["progression"]["advanced_deck"], [])
+
     async def test_advanced_setup_requires_day_or_night_before_creating_board(self) -> None:
         player = main.default_player_state()
         player["progression"]["simulation_unlocked"] = True
+        player["progression"]["advanced_deck"] = list(
+            main.ADVANCED_STARTER_DECK[: main.SIMULATION_ROUNDS]
+        )
         with (
             patch.object(
                 Storage,
@@ -176,6 +330,40 @@ class UiSimulationTests(unittest.IsolatedAsyncioTestCase):
                 await user.should_see("夜戦で開始")
                 await user.should_see("選んだ時間帯は全12ターン固定")
                 await user.should_not_see("海上作戦域")
+                for label in ("昼戦で開始", "夜戦で開始"):
+                    buttons = user.find(content=label).elements
+                    self.assertTrue(buttons)
+                    self.assertTrue(
+                        all("disable" not in button._props for button in buttons)  # pylint: disable=protected-access
+                    )
+                await asyncio.sleep(0.1)
+
+    async def test_advanced_setup_blocks_start_until_twelve_cards(self) -> None:
+        player = main.default_player_state()
+        player["progression"]["simulation_unlocked"] = True
+        player["progression"]["advanced_deck"] = []
+        with (
+            patch.object(
+                Storage,
+                "_create_persistent_dict",
+                side_effect=lambda _storage_id: PseudoPersistentDict(),
+            ),
+            patch.object(main, "ensure_player_state", return_value=player),
+            patch.object(main, "update_state_mode", return_value=player),
+            patch.object(main, "store_player_state", return_value=player),
+            patch.object(main, "load_saved_simulation", return_value=None),
+        ):
+            async with user_simulation(root=main.simulation_page) as user:
+                await user.open("/")
+                await user.should_see("本格用デッキ：現在 0 / 24枚")
+                await user.should_see("作戦開始には12枚必要です")
+                await user.should_see("作戦開始まであと12枚")
+                for label in ("昼戦で開始", "夜戦で開始"):
+                    buttons = user.find(content=label).elements
+                    self.assertTrue(buttons)
+                    self.assertTrue(
+                        all("disable" in button._props for button in buttons)  # pylint: disable=protected-access
+                    )
                 await asyncio.sleep(0.1)
 
     async def test_selecting_night_starts_one_fixed_night_match(self) -> None:

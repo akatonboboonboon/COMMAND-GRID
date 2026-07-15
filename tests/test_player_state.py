@@ -150,6 +150,8 @@ class PlayerStateTests(unittest.TestCase):
             changed = update_basic_tutorial_stage(changed, 4)
             changed = update_preference(changed, "high_contrast", True)
             changed = update_profile(changed, tagline="再ログイン後も保持")
+            changed = update_deck(changed, [])
+            changed["progression"]["advanced_deck"] = []
 
             try:
                 with patch(
@@ -168,6 +170,8 @@ class PlayerStateTests(unittest.TestCase):
                 )
                 self.assertEqual(restored["tutorials"]["basic_stage"], 4)
                 self.assertTrue(restored["preferences"]["high_contrast"])
+                self.assertEqual(restored["deck"], [])
+                self.assertEqual(restored["progression"]["advanced_deck"], [])
             finally:
                 store.close()
 
@@ -245,15 +249,29 @@ class PlayerStateTests(unittest.TestCase):
             default_player_state(), cards=[card.id for card in CARDS]
         )
         chosen = list(ADVANCED_STARTER_DECK[:12])
-        updated = update_advanced_deck(all_cards_state, chosen)
-        self.assertEqual(updated["progression"]["advanced_deck"], chosen)
+        for valid_deck in (
+            [],
+            chosen[:1],
+            chosen[:11],
+            chosen,
+            list(ADVANCED_STARTER_DECK),
+        ):
+            with self.subTest(valid_deck=valid_deck):
+                updated = update_advanced_deck(all_cards_state, valid_deck)
+                self.assertEqual(
+                    updated["progression"]["advanced_deck"], valid_deck
+                )
+                self.assertEqual(
+                    normalize_player_state(updated)["progression"]["advanced_deck"],
+                    valid_deck,
+                )
 
         for bad_deck in (
-            chosen[:11],
             [*chosen, chosen[0]],
             [*chosen[:11], "missing"],
             [*chosen[:11], "advanced_frames_01"],
             [*chosen[:11], "advanced_echelon_01"],
+            list(ADVANCED_CARD_INDEX)[:25],
         ):
             with self.subTest(deck=bad_deck):
                 with self.assertRaises(ValueError):
@@ -270,10 +288,10 @@ class PlayerStateTests(unittest.TestCase):
         self.assertFalse(repaired["progression"]["simulation_unlocked"])
         self.assertEqual(
             repaired["progression"]["advanced_deck"],
-            list(ADVANCED_STARTER_DECK[:12]),
+            list(ADVANCED_STARTER_DECK[:1]),
         )
 
-    def test_advanced_deck_repair_removes_nonplayable_cards_and_refills(self) -> None:
+    def test_advanced_deck_repair_removes_nonplayable_cards_and_preserves_size(self) -> None:
         preserved = [
             ADVANCED_STARTER_DECK[5],
             ADVANCED_STARTER_DECK[2],
@@ -299,7 +317,7 @@ class PlayerStateTests(unittest.TestCase):
         self.assertNotIn("advanced_frames_01", repaired)
         self.assertNotIn("advanced_echelon_01", repaired)
 
-        repaired_minimum = normalize_player_state(
+        repaired_short_deck = normalize_player_state(
             {
                 "progression": {
                     "advanced_deck": [
@@ -309,7 +327,15 @@ class PlayerStateTests(unittest.TestCase):
                 }
             }
         )["progression"]["advanced_deck"]
-        self.assertEqual(len(repaired_minimum), 12)
+        self.assertEqual(
+            repaired_short_deck,
+            list(ADVANCED_STARTER_DECK[:2]),
+        )
+
+        repaired_empty_deck = normalize_player_state(
+            {"progression": {"advanced_deck": []}}
+        )["progression"]["advanced_deck"]
+        self.assertEqual(repaired_empty_deck, [])
 
         repaired_maximum = normalize_player_state(
             {

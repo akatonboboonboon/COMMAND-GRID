@@ -31,7 +31,6 @@ ACCOUNT_SYNC_ERROR_STORAGE_KEY = "account_sync_error"
 SCHEMA_VERSION = 4
 MAX_DECK_SIZE = 12
 MAX_ADVANCED_DECK_SIZE = 24
-MIN_ADVANCED_DECK_SIZE = 12
 MAX_BATTLE_HISTORY = 50
 DEFAULT_DISPLAY_NAME = "COMMANDER"
 DEFAULT_TAGLINE = "偵察から覚えています"
@@ -477,14 +476,13 @@ def update_mode(state: object, mode: str) -> dict[str, Any]:
 
 
 def update_advanced_deck(state: object, card_ids: Sequence[str]) -> dict[str, Any]:
-    """Return state with a validated 12-to-24-card simulation deck."""
+    """Return state with a validated zero-to-24-card simulation deck."""
 
     if isinstance(card_ids, (str, bytes)) or not isinstance(card_ids, Sequence):
         raise ValueError("Advanced deck must be a sequence of card IDs")
-    if not MIN_ADVANCED_DECK_SIZE <= len(card_ids) <= MAX_ADVANCED_DECK_SIZE:
+    if len(card_ids) > MAX_ADVANCED_DECK_SIZE:
         raise ValueError(
-            f"Advanced deck must contain {MIN_ADVANCED_DECK_SIZE} to "
-            f"{MAX_ADVANCED_DECK_SIZE} cards"
+            f"Advanced deck must contain no more than {MAX_ADVANCED_DECK_SIZE} cards"
         )
     if any(not isinstance(card_id, str) for card_id in card_ids):
         raise ValueError("Every advanced deck entry must be a card ID string")
@@ -821,10 +819,9 @@ def _normalize_advanced_deck(raw: object) -> list[str]:
     if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
         return list(ADVANCED_STARTER_DECK)
 
-    target_size = min(
-        MAX_ADVANCED_DECK_SIZE,
-        max(MIN_ADVANCED_DECK_SIZE, len(raw)),
-    )
+    target_size = min(MAX_ADVANCED_DECK_SIZE, len(raw))
+    if target_size == 0:
+        return []
     result: list[str] = []
     for card_id in raw:
         if (
@@ -836,8 +833,8 @@ def _normalize_advanced_deck(raw: object) -> list[str]:
         if len(result) == target_size:
             break
 
-    # Older saves may contain cards that are no longer playable.  Keep the
-    # surviving user order, then refill to the saved deck's intended size.
+    # Older saves may contain cards that are no longer playable. Keep the
+    # surviving user order, then refill only to the saved deck's intended size.
     for card_id in (*ADVANCED_STARTER_DECK, *ADVANCED_CARD_INDEX):
         if card_id not in result:
             result.append(card_id)

@@ -95,6 +95,7 @@ from game_engine import MAX_ROUNDS, Phase, RuleViolation, calculate_lane_power
 from simulation_engine import (
     DAY,
     NIGHT,
+    SIMULATION_ROUNDS,
     THEATER_IDS,
     THEATER_LABELS,
     SimulationPhase,
@@ -453,7 +454,17 @@ def begin_training(*, reset: bool = True) -> None:
             close_multiplayer_session(app.storage.user)
         except MultiplayerError:
             pass
-    state = update_state_mode(ensure_player_state(app.storage.user), "training")
+    state = ensure_player_state(app.storage.user)
+    needs_new_match = reset or load_match(app.storage.user) is None
+    if needs_new_match and len(state["deck"]) < MAX_ROUNDS:
+        missing = MAX_ROUNDS - len(state["deck"])
+        ui.notify(
+            f"試合開始にはカードが{MAX_ROUNDS}枚必要です。あと{missing}枚追加してください。",
+            type="warning",
+        )
+        go("/lobby")
+        return
+    state = update_state_mode(state, "training")
     store_player_state(app.storage.user, state)
     try:
         if reset:
@@ -461,8 +472,8 @@ def begin_training(*, reset: bool = True) -> None:
         else:
             start_match(app.storage.user)
     except RuleViolation:
-        ui.notify(f"演習にはカードを{MAX_ROUNDS}枚以上入れたデッキが必要です。", type="warning")
-        go("/deck")
+        ui.notify(f"試合開始にはカードが{MAX_ROUNDS}枚必要です。", type="warning")
+        go("/lobby")
         return
     go("/battle")
 
@@ -531,7 +542,6 @@ def deck_mode_switcher(active_mode: str) -> None:
             "初心者演習・通常対戦の18枚ルールで使います。",
             beginner_count,
             12,
-            6,
             "/deck",
             "school",
             True,
@@ -542,7 +552,6 @@ def deck_mode_switcher(active_mode: str) -> None:
             f"本格シミュレーションの{len(ADVANCED_CARDS)}枚ルールだけで使います。",
             advanced_count,
             24,
-            12,
             "/simulation-deck",
             "hub",
             simulation_unlocked,
@@ -558,7 +567,7 @@ def deck_mode_switcher(active_mode: str) -> None:
                 ).classes("section-subtitle")
             chip("独立保存", "green")
         with ui.element("div").classes("deck-mode-grid"):
-            for mode, title, description, count, maximum, minimum, path, icon, unlocked in modes:
+            for mode, title, description, count, maximum, path, icon, unlocked in modes:
                 is_active = mode == active_mode
                 option = ui.button(on_click=lambda destination=path: go(destination)).props(
                     "flat no-caps"
@@ -581,9 +590,9 @@ def deck_mode_switcher(active_mode: str) -> None:
                         elif not unlocked:
                             chip("未開放", "yellow")
                     ui.label(description).classes("deck-mode-option__description")
-                    ui.label(
-                        f"現在 {count} / {maximum}枚 ・ 最低{minimum}枚"
-                    ).classes("deck-mode-option__count")
+                    ui.label(f"現在 {count} / {maximum}枚").classes(
+                        "deck-mode-option__count"
+                    )
 
 
 def unit_symbol(card: UnitCard, size: str = "md") -> None:
@@ -2267,8 +2276,9 @@ def cards_page() -> None:
             with ui.row().classes("items-start gap-3 no-wrap"):
                 ui.icon("lightbulb", size="26px")
                 with ui.column().classes("gap-1"):
-                    ui.label("この6枚だけで演習を始められます").classes("font-bold text-lg")
+                    ui.label("この6枚でカードの役割を覚えられます").classes("font-bold text-lg")
                     ui.label("歩兵が取り、偵察が見つけ、砲兵が助ける。工兵が整え、兵站が支え、機甲が突破します。").classes("text-sm")
+                    ui.label(f"試合開始にはデッキが{MAX_ROUNDS}枚必要です。").classes("muted text-xs")
 
         core_cards = [next(card for card in CARDS if card.branch == role and card.id in owned_cards) for role in ROLE_INFO]
         with ui.element("div").classes("beginner-card-grid"):
@@ -2478,7 +2488,7 @@ def advanced_cards_page() -> None:
 def deck_page() -> None:
     with page_shell(
         "/deck", "BEGINNER DECK", "初心者演習用デッキ",
-        "基本18枚から6〜12枚を選びます。本格シミュレーション用デッキとは別に保存されます。",
+        "基本18枚から最大12枚を選びます。0枚まで外せて、本格シミュレーション用デッキとは別に保存されます。",
     ):
         initial_player = ensure_player_state(app.storage.user)
         unlocked_deck_count = len(initial_player["tutorials"]["unlocked_official_decks"])
@@ -2526,11 +2536,6 @@ def deck_page() -> None:
                 update_deck(deck)
 
         def use_current_deck() -> None:
-            deck = ensure_player_state(app.storage.user)["deck"]
-            if len(deck) < 6:
-                ui.notify(f"対戦にはカードを{MAX_ROUNDS}枚以上入れてください。", type="warning")
-                return
-            ui.notify("初心者演習用デッキを使用します。", type="positive")
             go("/lobby")
 
         @ui.refreshable
@@ -2591,8 +2596,12 @@ def deck_page() -> None:
                         ui.label("編成アドバイス").classes("font-bold text-sm")
                         for tip in analysis["tips"]:
                             ui.label(tip).classes("deck-tip")
-                        with ui.row().classes("gap-2 mt-3"):
-                            primary_button("このデッキで初心者演習へ", icon="play_arrow", on_click=use_current_deck)
+                        with ui.row().classes("gap-2 mt-3 flex-wrap"):
+                            primary_button("試合開始前の確認へ", icon="play_arrow", on_click=use_current_deck)
+                            secondary_button(
+                                "すべて外して0枚から編制", icon="remove_circle_outline",
+                                on_click=lambda: update_deck([], "デッキを空にしました。0枚から編制できます。"),
+                            )
                             secondary_button(
                                 "元に戻す", icon="restart_alt",
                                 on_click=lambda: update_deck(list(STARTER_DECK), "スターターデッキに戻しました。"),
@@ -2601,7 +2610,7 @@ def deck_page() -> None:
                     with ui.card().classes("panel"):
                         section_heading(
                             f"現在選択中 {len(deck_ids)} / 12枚",
-                            "−を押すとデッキから外します。",
+                            "−を押すとデッキから外します。0枚まで外せます。",
                         )
                         with ui.column().classes("w-full gap-2 mt-3"):
                             if not deck_ids:
@@ -2631,6 +2640,8 @@ def lobby_page() -> None:
     ):
         lobby_player = ensure_player_state(app.storage.user)
         beginner_deck_count = len(lobby_player["deck"])
+        deck_ready = beginner_deck_count >= MAX_ROUNDS
+        missing_cards = max(0, MAX_ROUNDS - beginner_deck_count)
         if not lobby_player["tutorials"]["basic_completed"]:
             with ui.element("div").classes("beginner-callout beginner-callout--yellow"):
                 with ui.row().classes("w-full items-center justify-between gap-4"):
@@ -2640,10 +2651,18 @@ def lobby_page() -> None:
                     secondary_button("基礎チュートリアル", "/tutorials/basic", "school")
 
         def choose_mode(mode: str) -> None:
+            current = ensure_player_state(app.storage.user)
+            current_count = len(current["deck"])
+            if current_count < MAX_ROUNDS:
+                ui.notify(
+                    f"試合開始にはカードが{MAX_ROUNDS}枚必要です。あと{MAX_ROUNDS - current_count}枚追加してください。",
+                    type="warning",
+                )
+                return
             if mode == "training":
                 begin_training()
                 return
-            state = update_state_mode(ensure_player_state(app.storage.user), mode)
+            state = update_state_mode(current, mode)
             store_player_state(app.storage.user, state)
             if mode in {"casual", "ranked"}:
                 go("/online")
@@ -2657,13 +2676,22 @@ def lobby_page() -> None:
                 chip("おすすめ", "green")
                 ui.label("初心者演習").classes("start-here__title")
                 ui.label("相手は練習用です。時間制限なしで、カードを置くところから始めます。").classes("start-here__description")
-                primary_button(
+                start_button = primary_button(
                     "演習を始める", icon="play_arrow", on_click=lambda: choose_mode("training"),
                 ).classes("start-here__button")
+                if not deck_ready:
+                    start_button.props("disable")
             with ui.card().classes("panel panel--compact"):
                 ui.label("初心者演習で使うデッキ").classes("muted text-xs")
                 ui.label("初心者演習用デッキ").classes("font-bold")
-                ui.label(f"現在 {beginner_deck_count} / 12枚・最低6枚").classes("section-subtitle")
+                ui.label(f"現在 {beginner_deck_count} / 12枚").classes("section-subtitle")
+                if deck_ready:
+                    chip(f"試合開始に必要な{MAX_ROUNDS}枚を満たしています", "green")
+                else:
+                    chip(f"試合開始まであと{missing_cards}枚", "yellow")
+                    ui.label(
+                        f"試合開始には{MAX_ROUNDS}枚必要です。編成中は0枚でも保存できます。"
+                    ).classes("danger-text text-xs")
                 secondary_button("初心者用デッキを確認", "/deck", "view_carousel").classes("mt-2")
 
         with ui.expansion("ほかの遊び方", icon="unfold_more").classes("details-expansion"):
@@ -2677,10 +2705,12 @@ def lobby_page() -> None:
                         ui.icon(icon, size="28px").classes("blue-text")
                         ui.label(title).classes("font-bold text-lg mt-2")
                         ui.label(description).classes("section-subtitle")
-                        ui.button(
+                        mode_button = ui.button(
                             "このモードで遊ぶ", icon="play_arrow",
                             on_click=lambda selected_mode=mode: choose_mode(selected_mode),
                         ).props("flat no-caps").classes("card-action")
+                        if not deck_ready:
+                            mode_button.props("disable")
             secondary_button("詳しい対戦準備画面を見る", "/advanced-lobby", "tune").classes("mt-3")
 
 
@@ -2692,12 +2722,22 @@ def advanced_lobby_page() -> None:
     ):
         lobby_player = ensure_player_state(app.storage.user)
         beginner_deck_count = len(lobby_player["deck"])
+        deck_ready = beginner_deck_count >= MAX_ROUNDS
+        missing_cards = max(0, MAX_ROUNDS - beginner_deck_count)
 
         def select_mode(mode: str) -> None:
+            current = ensure_player_state(app.storage.user)
+            current_count = len(current["deck"])
+            if current_count < MAX_ROUNDS:
+                ui.notify(
+                    f"試合開始にはカードが{MAX_ROUNDS}枚必要です。あと{MAX_ROUNDS - current_count}枚追加してください。",
+                    type="warning",
+                )
+                return
             if mode == "training":
                 begin_training()
                 return
-            state = update_state_mode(ensure_player_state(app.storage.user), mode)
+            state = update_state_mode(current, mode)
             store_player_state(app.storage.user, state)
             if mode in {"casual", "ranked"}:
                 go("/online")
@@ -2719,9 +2759,11 @@ def advanced_lobby_page() -> None:
                         chip("おすすめ" if recommended else badge, "green" if recommended else "")
                     ui.label(title).classes("text-xl font-bold mt-2")
                     ui.label(body).classes("section-subtitle")
-                    ui.button(
+                    mode_button = ui.button(
                         "このモードを選ぶ", on_click=lambda selected_mode=mode: select_mode(selected_mode),
                     ).props("flat no-caps").classes("card-action")
+                    if not deck_ready:
+                        mode_button.props("disable")
 
         with ui.element("div").classes("content-grid"):
             with ui.card().classes("panel"):
@@ -2732,19 +2774,31 @@ def advanced_lobby_page() -> None:
                             ui.label("初心者演習・通常対戦用デッキ").classes("text-xl font-bold")
                             chip("18枚ルール", "green")
                         ui.label("本格シミュレーション用デッキとは別に保存されます。").classes("section-subtitle")
-                        ui.label(f"現在 {beginner_deck_count} / 12枚・最低6枚").classes("mono text-xs blue-text")
+                        ui.label(f"現在 {beginner_deck_count} / 12枚").classes("mono text-xs blue-text")
+                        if deck_ready:
+                            chip(f"試合開始に必要な{MAX_ROUNDS}枚を満たしています", "green")
+                        else:
+                            ui.label(
+                                f"試合開始には{MAX_ROUNDS}枚必要です。あと{missing_cards}枚追加してください。"
+                            ).classes("danger-text text-xs")
                     secondary_button("初心者用デッキを確認", "/deck", "view_carousel")
                 ui.separator().classes("bg-blue-grey-8 my-4")
                 with ui.row().classes("gap-3"):
-                    primary_button(
+                    battle_button = primary_button(
                         "このデッキで対戦", icon="swords",
                         on_click=lambda: select_mode(str(ensure_player_state(app.storage.user)["selected_mode"])),
                     )
+                    if not deck_ready:
+                        battle_button.props("disable")
                     secondary_button("ヒント設定", "/settings", "tips_and_updates")
             with ui.card().classes("panel"):
                 section_heading("フレンド対戦", "合言葉または招待URLで友人と遊べます。")
                 ui.label("部屋を作る側と参加する側で、同じ6文字の合言葉を使います。").classes("section-subtitle mt-3")
-                primary_button("フレンド部屋を開く", icon="group", on_click=lambda: select_mode("friend")).classes("mt-3")
+                friend_button = primary_button(
+                    "フレンド部屋を開く", icon="group", on_click=lambda: select_mode("friend")
+                ).classes("mt-3")
+                if not deck_ready:
+                    friend_button.props("disable")
 
 
 @ui.page("/online")
@@ -2760,14 +2814,47 @@ def online_queue_page() -> None:
         store_player_state(app.storage.user, player)
     display_name = str(player["profile"]["display_name"])
     mode_label = "ランク対戦" if mode == "ranked" else "オンライン対戦"
-
+    deck_count = len(player["deck"])
     try:
         existing_online = poll_multiplayer(app.storage.user)
-        if existing_online.get("status") == "left":
-            close_multiplayer_session(app.storage.user)
-        initial_view = join_queue(app.storage.user, mode, name=display_name)
     except MultiplayerError as error:
-        initial_view = {"status": "error", "message": str(error)}
+        existing_online = {"status": "error", "message": str(error)}
+    online_status = str(existing_online.get("status", "idle"))
+    if online_status in {"playing", "complete", "opponent_left"}:
+        go("/pvp")
+        return
+    if online_status == "waiting_friend":
+        go("/friend")
+        return
+    if online_status == "left":
+        try:
+            close_multiplayer_session(app.storage.user)
+        except MultiplayerError:
+            pass
+        online_status = "idle"
+
+    if online_status != "waiting" and deck_count < MAX_ROUNDS:
+        with page_shell(
+            "/lobby", "MATCHMAKING", f"{mode_label}・試合開始前の確認",
+            "マッチングを始める前に、使用デッキの枚数を確認します。",
+        ):
+            with ui.card().classes("panel"):
+                ui.icon("warning", size="38px").classes("yellow-text")
+                ui.label(f"現在 {deck_count} / 12枚").classes("text-2xl font-bold")
+                ui.label(
+                    f"試合開始には{MAX_ROUNDS}枚必要です。あと{MAX_ROUNDS - deck_count}枚追加してください。"
+                ).classes("section-subtitle")
+                ui.label("編成中は0枚でも保存できます。").classes("muted text-xs")
+                primary_button("デッキを編成する", "/deck", "view_carousel").classes("mt-3")
+        return
+
+    if online_status == "waiting":
+        initial_view = existing_online
+    else:
+        try:
+            initial_view = join_queue(app.storage.user, mode, name=display_name)
+        except MultiplayerError as error:
+            initial_view = {"status": "error", "message": str(error)}
 
     def cancel_queue() -> None:
         try:
@@ -2840,14 +2927,37 @@ def friend_room_page() -> None:
         player = update_state_mode(player, "friend")
         player = store_player_state(app.storage.user, player)
     display_name = str(player["profile"]["display_name"])
-    room_state: dict[str, object] = {"message": ""}
-
+    deck_count = len(player["deck"])
     existing_friend = poll_multiplayer(app.storage.user)
     if existing_friend.get("status") == "left":
         try:
             close_multiplayer_session(app.storage.user)
         except MultiplayerError:
             pass
+        existing_friend = {"status": "idle"}
+    friend_status = str(existing_friend.get("status", "idle"))
+    if friend_status in {"playing", "complete", "opponent_left"}:
+        go("/pvp")
+        return
+    if friend_status == "waiting":
+        go("/online")
+        return
+    has_existing_friend_session = friend_status == "waiting_friend"
+    if not has_existing_friend_session and deck_count < MAX_ROUNDS:
+        with page_shell(
+            "/lobby", "PRIVATE MATCH", "フレンド対戦・試合開始前の確認",
+            "部屋を作る前・合言葉で参加する前に、使用デッキの枚数を確認します。",
+        ):
+            with ui.card().classes("panel"):
+                ui.icon("warning", size="38px").classes("yellow-text")
+                ui.label(f"現在 {deck_count} / 12枚").classes("text-2xl font-bold")
+                ui.label(
+                    f"試合開始には{MAX_ROUNDS}枚必要です。あと{MAX_ROUNDS - deck_count}枚追加してください。"
+                ).classes("section-subtitle")
+                ui.label("編成中は0枚でも保存できます。").classes("muted text-xs")
+                primary_button("デッキを編成する", "/deck", "view_carousel").classes("mt-3")
+        return
+    room_state: dict[str, object] = {"message": ""}
 
     def create_room() -> None:
         try:
@@ -3344,7 +3454,9 @@ def battle_page() -> None:
             with ui.card().classes("panel"):
                 ui.icon("warning", size="38px").classes("yellow-text")
                 ui.label("デッキのカードが足りません").classes("text-2xl font-bold")
-                ui.label("デッキ編成で6〜12枚を選ぶと、対戦を始められます。").classes("section-subtitle")
+                ui.label(
+                    f"試合開始には{MAX_ROUNDS}枚必要です。編成中は0枚でも保存できます。"
+                ).classes("section-subtitle")
                 primary_button("デッキを編成する", "/deck", "view_carousel").classes("mt-3")
         return
 
@@ -3442,7 +3554,15 @@ def battle_page() -> None:
         execute_order()
 
     def reset_battle() -> None:
-        fresh = restart_match(app.storage.user)
+        try:
+            fresh = restart_match(app.storage.user)
+        except RuleViolation:
+            ui.notify(
+                f"再戦を始めるにはカードが{MAX_ROUNDS}枚必要です。",
+                type="warning",
+            )
+            go("/lobby")
+            return
         app.storage.user[selection_key] = {
             "game_id": fresh.game_id,
             "selected": None,
@@ -3808,9 +3928,18 @@ def simulation_page() -> None:
         }
 
         def start_simulation_with_time(battle_time: str) -> None:
+            current = ensure_player_state(app.storage.user)
+            deck_count = len(current["progression"]["advanced_deck"])
+            if deck_count < SIMULATION_ROUNDS:
+                ui.notify(
+                    f"作戦開始にはカードが{SIMULATION_ROUNDS}枚必要です。あと{SIMULATION_ROUNDS - deck_count}枚追加してください。",
+                    type="warning",
+                )
+                simulation_board.refresh()
+                return
             try:
                 start_fresh_simulation(
-                    ensure_player_state(app.storage.user),
+                    current,
                     battle_time=battle_time,
                 )
             except SimulationRuleError as error:
@@ -3894,6 +4023,12 @@ def simulation_page() -> None:
         def simulation_board() -> None:
             active = load_saved_simulation()
             if active is None:
+                setup_player = ensure_player_state(app.storage.user)
+                advanced_deck_count = len(
+                    setup_player["progression"]["advanced_deck"]
+                )
+                deck_ready = advanced_deck_count >= SIMULATION_ROUNDS
+                missing_cards = max(0, SIMULATION_ROUNDS - advanced_deck_count)
                 with ui.element("section").classes("simulation-setup"):
                     with ui.column().classes("gap-2 simulation-setup__intro"):
                         chip("作戦開始前", "yellow")
@@ -3902,6 +4037,19 @@ def simulation_page() -> None:
                             "昼戦か夜戦のどちらかを選びます。選んだ時間帯は全12ターン固定で、"
                             "途中で昼夜は切り替わりません。"
                         ).classes("section-subtitle")
+                        ui.label(
+                            f"本格用デッキ：現在 {advanced_deck_count} / 24枚"
+                        ).classes("font-bold")
+                        if deck_ready:
+                            chip(
+                                f"作戦開始に必要な{SIMULATION_ROUNDS}枚を満たしています",
+                                "green",
+                            )
+                        else:
+                            chip(f"作戦開始まであと{missing_cards}枚", "yellow")
+                            ui.label(
+                                f"作戦開始には{SIMULATION_ROUNDS}枚必要です。編成中は0枚でも保存できます。"
+                            ).classes("danger-text text-sm")
                     with ui.element("div").classes("simulation-time-choice-grid"):
                         with ui.element("article").classes(
                             "simulation-time-choice simulation-time-choice--day"
@@ -3911,11 +4059,13 @@ def simulation_page() -> None:
                             ui.label(
                                 "夜間補正はありません。すべてのカードを表示どおりの能力で使えます。"
                             ).classes("text-sm simulation-time-choice__body")
-                            primary_button(
+                            day_button = primary_button(
                                 "昼戦で開始",
                                 icon="play_arrow",
                                 on_click=lambda: start_simulation_with_time(DAY),
                             ).classes("simulation-time-choice__button")
+                            if not deck_ready:
+                                day_button.props("disable")
                         with ui.element("article").classes(
                             "simulation-time-choice simulation-time-choice--night"
                         ):
@@ -3925,11 +4075,13 @@ def simulation_page() -> None:
                                 "航空組織・偵察支援・機甲組織・砲兵組織・防空・対戦車・ミサイル・"
                                 "情報・通信・治安支援は、制圧・支援・偵察・機動がそれぞれ1低下します。"
                             ).classes("text-sm simulation-time-choice__body")
-                            primary_button(
+                            night_button = primary_button(
                                 "夜戦で開始",
                                 icon="play_arrow",
                                 on_click=lambda: start_simulation_with_time(NIGHT),
                             ).classes("simulation-time-choice__button")
+                            if not deck_ready:
+                                night_button.props("disable")
                 with ui.card().classes("panel"):
                     section_heading(
                         "選択の目安",
@@ -3940,7 +4092,7 @@ def simulation_page() -> None:
                         "どう活用するかが重要になります。"
                     ).classes("section-subtitle mt-2")
                     secondary_button(
-                        f"本格用デッキを確認（{len(player['progression']['advanced_deck'])} / 24枚）",
+                        f"本格用デッキを確認（{advanced_deck_count} / 24枚）",
                         "/simulation-deck",
                         "tune",
                     ).classes("mt-3")
@@ -4146,7 +4298,7 @@ def simulation_page() -> None:
 def simulation_deck_page() -> None:
     with page_shell(
         "/deck", "ADVANCED DECK", "本格シミュレーション用デッキ",
-        f"プレイ可能な{len(ADVANCED_CARDS)}枚から12〜24枚を選びます。初心者演習用デッキとは別に保存されます。",
+        f"プレイ可能な{len(ADVANCED_CARDS)}枚から最大24枚を選びます。0枚まで外せて、初心者演習用デッキとは別に保存されます。",
     ):
         player = ensure_player_state(app.storage.user)
 
@@ -4171,9 +4323,6 @@ def simulation_deck_page() -> None:
             current = ensure_player_state(app.storage.user)
             selected = list(current["progression"]["advanced_deck"])
             if card_id in selected:
-                if len(selected) <= 12:
-                    ui.notify("対戦に必要な最低12枚は残してください。", type="warning")
-                    return
                 selected.remove(card_id)
             else:
                 if len(selected) >= 24:
@@ -4189,6 +4338,16 @@ def simulation_deck_page() -> None:
             deck_mode_summary.refresh()
             selected_deck.refresh()
             advanced_catalog.refresh()
+
+        def clear_advanced_deck() -> None:
+            current = update_state_advanced_deck(
+                ensure_player_state(app.storage.user), []
+            )
+            store_player_state(app.storage.user, current)
+            deck_mode_summary.refresh()
+            selected_deck.refresh()
+            advanced_catalog.refresh()
+            ui.notify("デッキを空にしました。0枚から編制できます。", type="positive")
 
         def reset_advanced_deck() -> None:
             current = update_state_advanced_deck(
@@ -4211,8 +4370,13 @@ def simulation_deck_page() -> None:
                 ui.label(
                     "変更後の部隊名・番号・自動割り振り能力を反映しています。枠と部隊規模はカードではありません。"
                 ).classes("section-subtitle")
-            with ui.row().classes("gap-2"):
-                primary_button("時間帯を選んで新規作戦", icon="play_arrow", on_click=start_selected_simulation)
+            with ui.row().classes("gap-2 flex-wrap"):
+                primary_button("試合開始前の確認へ", icon="play_arrow", on_click=start_selected_simulation)
+                secondary_button(
+                    "すべて外して0枚から編制",
+                    icon="remove_circle_outline",
+                    on_click=clear_advanced_deck,
+                )
                 secondary_button("公式24枚へ戻す", icon="restart_alt", on_click=reset_advanced_deck)
 
         @ui.refreshable
@@ -4221,7 +4385,7 @@ def simulation_deck_page() -> None:
             deck = list(current["progression"]["advanced_deck"])
             section_heading(
                 f"選択中 {len(deck)} / 24枚",
-                "カードを押すと外せます。12枚未満にはできません。",
+                "カードを押すと外せます。0枚まで外せます。",
             )
             with ui.element("div").classes("simulation-deck-grid"):
                 for card_id in deck:
